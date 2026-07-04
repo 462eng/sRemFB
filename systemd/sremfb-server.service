@@ -1,0 +1,14 @@
+[Unit]
+Description=sRemFB virtual display server
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Environment=SREMFB_PORT=4629
+EnvironmentFile=-/etc/sremfb-server.conf
+ExecStart=/usr/local/bin/sremfb-server
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

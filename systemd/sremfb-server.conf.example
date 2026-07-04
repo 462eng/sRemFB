@@ -1,0 +1,5 @@
+# sremfb-server configuration — /etc/sremfb-server.conf
+# IPv4 ranges allowed to connect (CIDR, comma or space separated).
+# Unset or empty = accept every address (dedicated/trusted LAN only!).
+SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
+# SREMFB_PORT=4629

@@ -1,0 +1,5 @@
+# sRemFB : donne au groupe video la main sur la création des devices EVDI.
+# Le serveur (user de session) régénère des devices NEUFS à son démarrage :
+# mutter ne survit pas à la réouverture d'un device déjà piloté (EBUSY au
+# reopen puis hotplugs ignorés sur cette card).
+ACTION=="add", DEVPATH=="/devices/evdi", RUN+="/bin/sh -c 'chgrp video /sys/devices/evdi/add /sys/devices/evdi/remove_all && chmod 664 /sys/devices/evdi/add /sys/devices/evdi/remove_all'"

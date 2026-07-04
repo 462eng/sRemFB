@@ -1,0 +1,4 @@
+# sRemFB : nom de marque du vendor EDID « RFB » — GNOME compose l'étiquette
+# des Réglages comme « <vendor> <diagonale>" », soit « 462eng sRemFB 24" ».
+acpi:RFB*:
+ ID_VENDOR_FROM_DATABASE=462eng sRemFB

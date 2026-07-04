@@ -1,0 +1,10 @@
+# sremfb-client configuration — /etc/sremfb.conf
+# Address of the PC running sremfb-server on the dedicated LAN (required)
+SREMFB_SERVER=192.0.2.1
+# SREMFB_PORT=4629
+# SREMFB_FBDEV=/dev/fb0
+# SREMFB_TTY=/dev/tty1
+# Workaround for fbdev deferred-io quirks (pixels lagging/not appearing):
+# SREMFB_WRITE_MODE=pwrite
+# Override the MAC announced to the server (monitor identity):
+# SREMFB_MAC=aa:bb:cc:dd:ee:ff

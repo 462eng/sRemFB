@@ -1,0 +1,7 @@
+*.o
+server/sremfb-server
+client/sremfb-client
+sremfb-test-*.ppm
+dist/
+pkg/sysroot/
+.claude/
