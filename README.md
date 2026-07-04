@@ -102,7 +102,7 @@ screen "unplugs".
 | `SREMFB_ALLOW` (server) | — | allowed IPv4 ranges, comma-separated CIDRs (empty = accept everything); `/etc/sremfb-server.conf` |
 | `SREMFB_SERVER` (client) | — | server host/IP (required) |
 | `SREMFB_FBDEV` (client) | `/dev/fb0` | framebuffer device |
-| `SREMFB_TTY` (client) | `/dev/tty1` | VT switched to graphics mode |
+| `SREMFB_TTY` (client) | `/dev/tty1` | VT taken over (foreground + graphics mode); use one with no getty, e.g. `/dev/tty7` |
 | `SREMFB_WRITE_MODE` (client) | `mmap` | `pwrite` if the display lags (deferred-io) |
 | `SREMFB_MAC` (client) | auto | override the announced MAC (= monitor identity) |
 | `SREMFB_MODEL` (client) | auto | override the announced model name (13 chars max) |
@@ -132,9 +132,9 @@ position).
 > was already driving ("Failed to reopen cardN: EBUSY", then hotplugs on
 > that card are ignored). The server guards against this three ways:
 > devices are kept open in a pool for the whole process lifetime; devices
-> are **regenerated from scratch on every startup** (the udev rule
-> `60-sremfb-evdi.rules` opens `/sys/devices/evdi/{add,remove_all}` to the
-> `video` group — the session user must be a member); and as a last
+> are **regenerated from scratch on every startup** (a boot-time service,
+> `sremfb-evdi-perms.service`, opens `/sys/devices/evdi/{add,remove_all}`
+> to the `video` group — the session user must be a member); and as a last
 > resort, devices that fail to light up within 10 s are quarantined (the
 > client's next reconnect picks another one).
 

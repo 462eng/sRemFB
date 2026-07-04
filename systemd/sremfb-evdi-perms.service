@@ -1,0 +1,18 @@
+[Unit]
+# sRemFB : donne au groupe video la main sur la création des devices EVDI,
+# de façon fiable AU BOOT — la règle udev 60-sremfb-evdi.rules ne suffit pas
+# (son chmod s'exécute avant que /sys/devices/evdi/{add,remove_all} existent).
+# Sans ces droits, le reset anti-grippage du serveur est sauté et mutter se
+# grippe (EBUSY) sur les connecteurs EVDI.
+Description=sRemFB: give the video group control of EVDI device creation
+Documentation=https://github.com/462eng/sRemFB
+After=systemd-modules-load.service
+ConditionPathExists=/sys/devices/evdi
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'chgrp video /sys/devices/evdi/add /sys/devices/evdi/remove_all && chmod 0664 /sys/devices/evdi/add /sys/devices/evdi/remove_all'
+
+[Install]
+WantedBy=multi-user.target

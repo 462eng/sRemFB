@@ -100,7 +100,7 @@ l'écran « se débranche ».
 | `SREMFB_ALLOW` (serveur) | — | plages IPv4 autorisées, CIDR séparés par virgules (vide = tout accepter) ; `/etc/sremfb-server.conf` |
 | `SREMFB_SERVER` (client) | — | hôte/IP du serveur (requis) |
 | `SREMFB_FBDEV` (client) | `/dev/fb0` | device framebuffer |
-| `SREMFB_TTY` (client) | `/dev/tty1` | VT passé en mode graphique |
+| `SREMFB_TTY` (client) | `/dev/tty1` | VT prise en main (avant-plan + mode graphique) ; en préférer une sans getty, ex. `/dev/tty7` |
 | `SREMFB_WRITE_MODE` (client) | `mmap` | `pwrite` si l'affichage traîne (deferred-io) |
 | `SREMFB_MAC` (client) | auto | forcer le MAC annoncé (= identité du moniteur) |
 | `SREMFB_MODEL` (client) | auto | forcer le nom de modèle annoncé (13 car. max) |
@@ -130,11 +130,11 @@ indépendante).
 > EVDI déjà piloté (« Failed to reopen cardN: EBUSY » puis hotplugs
 > ignorés sur cette card). Le serveur s'en protège trois fois : devices
 > gardés ouverts en pool toute la vie du process ; devices **régénérés à
-> neuf à chaque démarrage** (la règle udev `60-sremfb-evdi.rules` ouvre
-> `/sys/devices/evdi/{add,remove_all}` au groupe `video` — l'utilisateur
-> de session doit en faire partie) ; et en secours, quarantaine des
-> devices qui ne s'allument pas en 10 s (la reconnexion du client en
-> prend un autre).
+> neuf à chaque démarrage** (un service au boot, `sremfb-evdi-perms.service`,
+> ouvre `/sys/devices/evdi/{add,remove_all}` au groupe `video` —
+> l'utilisateur de session doit en faire partie) ; et en secours,
+> quarantaine des devices qui ne s'allument pas en 10 s (la reconnexion du
+> client en prend un autre).
 
 ## Notes
 

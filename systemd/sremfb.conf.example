@@ -3,7 +3,9 @@
 SREMFB_SERVER=192.0.2.1
 # SREMFB_PORT=4629
 # SREMFB_FBDEV=/dev/fb0
-# SREMFB_TTY=/dev/tty1
+# VT taken over by the client (switched to foreground + graphics mode);
+# prefer one with no getty to avoid a stray console cursor, e.g. tty7:
+# SREMFB_TTY=/dev/tty7
 # Workaround for fbdev deferred-io quirks (pixels lagging/not appearing):
 # SREMFB_WRITE_MODE=pwrite
 # Override the MAC announced to the server (monitor identity):

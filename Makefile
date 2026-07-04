@@ -26,6 +26,10 @@ install-server: server-build
 		$(DESTDIR)/etc/udev/hwdb.d/61-sremfb-display-vendor.hwdb
 	install -D -m 644 systemd/60-sremfb-evdi.rules \
 		$(DESTDIR)/etc/udev/rules.d/60-sremfb-evdi.rules
+	install -D -m 644 systemd/sremfb-evdi-perms.service \
+		$(DESTDIR)/etc/systemd/system/sremfb-evdi-perms.service
+	-systemctl daemon-reload && \
+		systemctl enable --now sremfb-evdi-perms.service
 	-chgrp video /sys/devices/evdi/add /sys/devices/evdi/remove_all 2>/dev/null && \
 		chmod 664 /sys/devices/evdi/add /sys/devices/evdi/remove_all
 	@test -f $(DESTDIR)/etc/sremfb-server.conf || \

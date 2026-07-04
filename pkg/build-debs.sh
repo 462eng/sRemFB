@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.0.3}
+VERSION=${1:-1.0.4}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -71,12 +71,15 @@ EOF
 # ---- sremfb-server (amd64) ----
 ROOT=$STAGE/server
 mkdir -p "$ROOT/usr/bin" "$ROOT/usr/lib/systemd/user" \
+         "$ROOT/usr/lib/systemd/system" \
          "$ROOT/usr/lib/udev/hwdb.d" "$ROOT/usr/lib/udev/rules.d" \
          "$ROOT/etc/modules-load.d" "$ROOT/etc/modprobe.d"
 install -m 755 "$TOP/server/sremfb-server" "$ROOT/usr/bin/sremfb-server"
 strip "$ROOT/usr/bin/sremfb-server"
 sed 's|/usr/local/bin|/usr/bin|' "$TOP/systemd/sremfb-server.service" \
     > "$ROOT/usr/lib/systemd/user/sremfb-server.service"
+install -m 644 "$TOP/systemd/sremfb-evdi-perms.service" \
+    "$ROOT/usr/lib/systemd/system/sremfb-evdi-perms.service"
 install -m 644 "$TOP/systemd/61-sremfb-display-vendor.hwdb" \
     "$ROOT/usr/lib/udev/hwdb.d/"
 install -m 644 "$TOP/systemd/60-sremfb-evdi.rules" \
@@ -95,8 +98,14 @@ cat > "$ROOT/DEBIAN/postinst" <<'EOF'
 systemd-hwdb update || true
 udevadm control --reload 2>/dev/null || true
 modprobe evdi || true
-# la règle udev ne s'applique qu'au prochain chargement du module :
-# appliquer les droits tout de suite (reset des devices par le serveur)
+# Le service oneshot pose les droits groupe video sur /sys/devices/evdi/*
+# de façon fiable au boot (la règle udev seule ne suffit pas : son chmod
+# court avant que les attributs existent). --now l'applique tout de suite.
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now sremfb-evdi-perms.service 2>/dev/null || true
+fi
+# secours si systemd absent (chroot, etc.)
 if [ -e /sys/devices/evdi/add ]; then
     chgrp video /sys/devices/evdi/add /sys/devices/evdi/remove_all || true
     chmod 664 /sys/devices/evdi/add /sys/devices/evdi/remove_all || true
@@ -105,6 +114,15 @@ echo "sremfb-server : plages autorisées dans /etc/sremfb-server.conf, puis :"
 echo "  systemctl --user enable --now sremfb-server"
 EOF
 chmod 755 "$ROOT/DEBIAN/postinst"
+cat > "$ROOT/DEBIAN/postrm" <<'EOF'
+#!/bin/sh -e
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now sremfb-evdi-perms.service 2>/dev/null || true
+    fi
+fi
+EOF
+chmod 755 "$ROOT/DEBIAN/postrm"
 make_deb sremfb-server amd64 \
 "Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms
 Conflicts: rfb-server

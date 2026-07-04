@@ -105,7 +105,7 @@ targets.
 | `sremfb-client` | armhf | ARMv7 SBC (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.0.3 by default
+./pkg/build-debs.sh              # version 1.0.4 by default
 ./pkg/build-debs.sh 3.1.0        # explicit version
 ```
 
@@ -144,9 +144,9 @@ override it with the `MAINT` environment variable
 
 ```sh
 # server
-sudo apt install ./dist/sremfb-server_1.0.3_amd64.deb
+sudo apt install ./dist/sremfb-server_1.0.4_amd64.deb
 # client (on the SBC)
-sudo apt install ./dist/sremfb-client_1.0.3_arm64.deb
+sudo apt install ./dist/sremfb-client_1.0.4_arm64.deb
 ```
 
 On an already-modified config, `dpkg -i --force-confold` keeps the

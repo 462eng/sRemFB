@@ -15,7 +15,8 @@
  *   SREMFB_SERVER      server host/IP (required; or argv[1])
  *   SREMFB_PORT        TCP port, default 4629 (or argv[2])
  *   SREMFB_FBDEV       framebuffer device, default /dev/fb0
- *   SREMFB_TTY         VT to switch to graphics mode, default /dev/tty1
+ *   SREMFB_TTY         VT to switch to and put in graphics mode; prefer one
+ *                      with no getty (e.g. /dev/tty7), default /dev/tty1
  *   SREMFB_WRITE_MODE  "mmap" (default) or "pwrite" (deferred-io workaround)
  *   SREMFB_MAC         override the announced MAC (aa:bb:cc:dd:ee:ff)
  *   SREMFB_MODEL       override the announced panel model (13 chars max;
@@ -48,6 +49,7 @@
 #include <unistd.h>
 #include <linux/fb.h>
 #include <linux/kd.h>
+#include <linux/vt.h>
 
 #include <lz4.h>
 
@@ -271,10 +273,20 @@ static void fb_blit_row(unsigned sx, unsigned sy, unsigned w, const uint8_t *row
 
 /* ---------------------------------------------------------- console */
 
+/* Extract the VT number from a /dev/ttyN path (e.g. "/dev/tty7" -> 7). */
+static int vt_of(const char *tty)
+{
+    const char *e = tty + strlen(tty);
+    while (e > tty && e[-1] >= '0' && e[-1] <= '9')
+        e--;
+    return *e ? atoi(e) : -1;
+}
+
 static void console_restore(void)
 {
     if (C.tty_restore_needed && C.tty_fd >= 0) {
         ioctl(C.tty_fd, KDSETMODE, KD_TEXT);
+        ioctl(C.tty_fd, VT_ACTIVATE, 1);   /* hand a login console back */
         C.tty_restore_needed = 0;
     }
 }
@@ -303,6 +315,15 @@ static void console_grab(void)
         if (write(C.tty_fd, esc, sizeof(esc) - 1) < 0)
             logmsg("could not write console escape sequences");
     }
+    /* Bring our VT to the foreground: KD_GRAPHICS only silences fbcon on the
+     * *active* VT, so if we booted onto another VT (e.g. a getty on tty1/2)
+     * its blinking cursor keeps being drawn on the framebuffer. Use a VT with
+     * no getty (beyond logind's NAutoVTs, e.g. tty7). */
+    int vt = vt_of(C.tty);
+    if (vt > 0 && (ioctl(C.tty_fd, VT_ACTIVATE, vt) < 0 ||
+                   ioctl(C.tty_fd, VT_WAITACTIVE, vt) < 0))
+        logmsg("could not switch to VT %d (%s): console may show through",
+               vt, strerror(errno));
 }
 
 /* -------------------------------------------------------------- mac */
