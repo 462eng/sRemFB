@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.1.3}
+VERSION=${1:-1.2.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist

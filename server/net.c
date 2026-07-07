@@ -1,7 +1,9 @@
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -172,6 +174,8 @@ static gboolean readn(int fd, void *buf, size_t len)
     return TRUE;
 }
 
+/* Blocking-style send, only used for the pre-stream hellos (the socket
+ * may already be non-blocking: wait for writability on EAGAIN). */
 gboolean net_send_all(int fd, const void *buf, size_t len)
 {
     const uint8_t *p = buf;
@@ -180,12 +184,33 @@ gboolean net_send_all(int fd, const void *buf, size_t len)
         if (n < 0) {
             if (errno == EINTR)
                 continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                struct pollfd pf = { .fd = fd, .events = POLLOUT };
+                if (poll(&pf, 1, 5000) <= 0)
+                    return FALSE;
+                continue;
+            }
             return FALSE;
         }
         p += n;
         len -= (size_t)n;
     }
     return TRUE;
+}
+
+/* One non-blocking send: >0 bytes written, 0 on EAGAIN, -1 fatal. */
+ssize_t net_send_some(int fd, const void *buf, size_t len)
+{
+    for (;;) {
+        ssize_t n = send(fd, buf, len, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n >= 0)
+            return n;
+        if (errno == EINTR)
+            continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+        return -1;
+    }
 }
 
 /* Accepts a pending connection, enforces the allowlist and performs the
@@ -223,30 +248,46 @@ int net_accept_and_hello(SremfbServer *srv, int listen_fd,
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+    int sndbuf = 256 * 1024;   /* modest kernel buffer: the transmit
+                                  queue (xmit.c) coalesces frames as
+                                  soon as the socket pushes back, so a
+                                  slow client gets *fresh* pixels
+                                  instead of a deep stale backlog */
     setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_to, sizeof(user_to));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof(snd_to));
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf));
 
     if (!readn(fd, hello, sizeof(*hello))) {
         g_message("client hello read failed (%s)", peer);
         close(fd);
         return -1;
     }
+    /* streaming writes are non-blocking from here on (xmit.c) */
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK);
     return fd;
+}
+
+void net_fill_server_hello(struct sremfb_server_hello *sh,
+                           uint16_t width, uint16_t height,
+                           uint8_t pixfmt, uint16_t status, uint8_t flags)
+{
+    memset(sh, 0, sizeof(*sh));
+    sh->magic = SREMFB_MAGIC;
+    sh->proto_ver = SREMFB_PROTO_VER;
+    sh->status = status;
+    sh->width = width;
+    sh->height = height;
+    sh->pixfmt = pixfmt;
+    sh->flags = flags;
 }
 
 gboolean net_send_server_hello(int fd, uint16_t width, uint16_t height,
                                uint8_t pixfmt, uint16_t status,
                                uint8_t flags)
 {
-    struct sremfb_server_hello sh = {0};
+    struct sremfb_server_hello sh;
 
-    sh.magic = SREMFB_MAGIC;
-    sh.proto_ver = SREMFB_PROTO_VER;
-    sh.status = status;
-    sh.width = width;
-    sh.height = height;
-    sh.pixfmt = pixfmt;
-    sh.flags = flags;
+    net_fill_server_hello(&sh, width, height, pixfmt, status, flags);
     return net_send_all(fd, &sh, sizeof(sh));
 }

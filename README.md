@@ -189,12 +189,12 @@ position).
 - Bandwidth: at 1080p/32bpp a full frame is ~8.3 MB, but thanks to damage
   only the changed rectangles go over the wire. RGB565 halves that.
   Static content: zero traffic.
-- Known limitation: sends are blocking, so a congested or dead client can
-  delay the others up to `SO_SNDTIMEO` (20 s) — head-of-line blocking. A
-  possible fix (not implemented): non-blocking sockets + a "latest frame"
-  buffer per client. The adaptive H.264 mode shrinks the sends by an
-  order of magnitude on the clients that need it, which mitigates this
-  in practice.
+- A slow client never delays the others: sends are **non-blocking** and
+  each client has its own queue. Damage accumulates there as a dirty
+  region and the next frame is only built (converted, compressed or
+  encoded) when that client's socket can take it, **from the freshest
+  pixels available** — a lagging client receives fewer frames, never
+  stale ones, and nobody else notices.
 
 ## License
 

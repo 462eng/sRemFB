@@ -107,13 +107,11 @@ static void send_ping(SremfbClient *c)
     msg.hdr.payload_len = sizeof(msg.t_us);
     msg.t_us = (uint64_t)g_get_monotonic_time();
 
-    if (!net_send_all(c->fd, &msg, sizeof(msg))) {
-        sremfb_schedule_client_lost(c);
-        return;
-    }
+    /* stamped at enqueue: if it waits behind a coalesced frame in our
+     * own queue, that wait is genuine backlog and belongs in the echo */
+    sremfb_xmit_ctrl(c, &msg, sizeof(msg));
     c->pings_outstanding++;
     c->last_ping_us = (gint64)msg.t_us;
-    c->wire_total += sizeof(msg);
     c->ping_wire_mark = c->wire_total;   /* after: pings aren't traffic */
 }
 
@@ -323,48 +321,63 @@ void sremfb_ctl_on_pong(SremfbClient *c, uint64_t t_echo_us)
     ctl_evaluate(c);
 }
 
-/* Called after every successful grab+send, in any mode. raw_bytes is the
- * pre-compression size of the damage, wire_bytes what actually left. */
-void sremfb_ctl_on_grab(SremfbClient *c, size_t raw_bytes, size_t wire_bytes)
+/* Closes the rate-sampling window when due. Fed by both sides: raw
+ * bytes at damage time, wire bytes at build time. */
+static void ctl_windows(SremfbClient *c, gint64 now)
+{
+    if (c->cap_win_start_us == 0) {
+        c->cap_win_start_us = now;
+        return;
+    }
+    gint64 win = now - c->cap_win_start_us;
+    if (win < CAP_WINDOW_US)
+        return;
+    double wire_rate = (double)c->cap_win_bytes * G_USEC_PER_SEC / win;
+    double raw_rate = (double)c->raw_win_bytes * G_USEC_PER_SEC / win;
+    c->raw_rate_Bps = EWMA(c->raw_rate_Bps, raw_rate, 0.3);
+    /* RAW under pressure => the achieved wire rate IS the path's
+     * end-to-end capacity (network and client alike). Never learn
+     * from H.264 periods: their wire rate is deliberately tiny and
+     * says nothing about what the path could carry. */
+    if (c->xmit_mode == SREMFB_XMIT_RAW && wire_rate > 0 &&
+        raw_pressure(c, now))
+        c->capacity_Bps = EWMA(c->capacity_Bps, wire_rate, 0.3);
+    if (c->xmit_mode == SREMFB_XMIT_RAW && c->cap_win_bytes > 0)
+        c->lz4_ratio_ewma = EWMA(c->lz4_ratio_ewma,
+                                 raw_rate / wire_rate, 0.2);
+    c->cap_win_start_us = now;
+    c->cap_win_bytes = 0;
+    c->raw_win_bytes = 0;
+}
+
+/* Damage arrived from the compositor (whatever the transmit queue does
+ * with it): tracks the *content* — continuity and raw byte rate. */
+void sremfb_ctl_on_damage(SremfbClient *c, size_t raw_bytes)
 {
     gint64 now = g_get_monotonic_time();
 
-    if (c->last_grab_us) {
-        double gap = (double)(now - c->last_grab_us);
+    if (!c->last_grab_us || now - c->last_grab_us >= DAMAGE_GAP_US)
+        c->damage_cont_us = now;               /* streak restarts */
+    c->last_grab_us = now;
+    c->raw_win_bytes += raw_bytes;
+    ctl_windows(c, now);
+    ctl_evaluate(c);
+}
+
+/* A frame message was built for the wire: tracks the *delivery* — the
+ * fps the client actually gets and the achieved wire rate. */
+void sremfb_ctl_on_deliver(SremfbClient *c, size_t wire_bytes)
+{
+    gint64 now = g_get_monotonic_time();
+
+    if (c->last_deliver_us) {
+        double gap = (double)(now - c->last_deliver_us);
         if (gap > 0)
             c->grab_fps = EWMA(c->grab_fps, G_USEC_PER_SEC / gap, 0.2);
-        if (gap >= DAMAGE_GAP_US)
-            c->damage_cont_us = now;           /* streak restarts */
-    } else {
-        c->damage_cont_us = now;
     }
-    c->last_grab_us = now;
-
-    /* damage byte rate (what RAW would have to move), EWMA over ~2 s */
-    if (c->cap_win_start_us == 0)
-        c->cap_win_start_us = now;
+    c->last_deliver_us = now;
     c->cap_win_bytes += wire_bytes;
-    c->raw_win_bytes += raw_bytes;
-    gint64 win = now - c->cap_win_start_us;
-    if (win >= CAP_WINDOW_US) {
-        double wire_rate = (double)c->cap_win_bytes * G_USEC_PER_SEC / win;
-        double raw_rate = (double)c->raw_win_bytes * G_USEC_PER_SEC / win;
-        c->raw_rate_Bps = EWMA(c->raw_rate_Bps, raw_rate, 0.3);
-        /* RAW under pressure => the achieved wire rate IS the path's
-         * end-to-end capacity (network and client alike). Never learn
-         * from H.264 periods: their wire rate is deliberately tiny and
-         * says nothing about what the path could carry. */
-        if (c->xmit_mode == SREMFB_XMIT_RAW && wire_rate > 0 &&
-            raw_pressure(c, now))
-            c->capacity_Bps = EWMA(c->capacity_Bps, wire_rate, 0.3);
-        if (c->xmit_mode == SREMFB_XMIT_RAW && c->cap_win_bytes > 0)
-            c->lz4_ratio_ewma = EWMA(c->lz4_ratio_ewma,
-                                     raw_rate / wire_rate, 0.2);
-        c->cap_win_start_us = now;
-        c->cap_win_bytes = 0;
-        c->raw_win_bytes = 0;
-    }
-
+    ctl_windows(c, now);
     ctl_evaluate(c);
 }
 
@@ -417,6 +430,7 @@ void sremfb_ctl_start(SremfbClient *c)
     c->delay_ewma_us = 0.0;
     c->grab_fps = 0.0;
     c->last_grab_us = 0;
+    c->last_deliver_us = 0;
     c->last_ping_us = 0;
     c->last_pong_us = g_get_monotonic_time();
     c->pings_outstanding = 0;

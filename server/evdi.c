@@ -73,49 +73,7 @@ static void send_stats(SremfbClient *c)
     c->st_since_us = now;
 }
 
-/* Sends one rect (already converted into rectbuf) as a frame message.
- * Returns FALSE on send failure (client teardown already scheduled). */
-static gboolean send_rect(SremfbClient *c, uint32_t x, uint32_t y,
-                          uint32_t w, uint32_t h, size_t raw_len)
-{
-    struct sremfb_frame_hdr *hdr = (struct sremfb_frame_hdr *)c->sendbuf;
-    uint8_t *payload = c->sendbuf + sizeof(*hdr);
-    size_t out_len = raw_len;
-
-    memset(hdr, 0, sizeof(*hdr));
-    hdr->magic = SREMFB_MAGIC;
-    hdr->encoding = SREMFB_ENC_RAW;
-    hdr->x = (uint16_t)x;
-    hdr->y = (uint16_t)y;
-    hdr->w = (uint16_t)w;
-    hdr->h = (uint16_t)h;
-
-    if (c->lz4) {
-        int csz = LZ4_compress_fast((const char *)c->rectbuf,
-                                    (char *)payload, (int)raw_len,
-                                    LZ4_compressBound((int)raw_len), 1);
-        if (csz > 0 && (size_t)csz < raw_len) {
-            hdr->encoding = SREMFB_ENC_LZ4;
-            out_len = (size_t)csz;
-        }
-    }
-    if (hdr->encoding == SREMFB_ENC_RAW)
-        memcpy(payload, c->rectbuf, raw_len);
-    hdr->payload_len = (uint32_t)out_len;
-
-    if (!net_send_all(c->fd, c->sendbuf, sizeof(*hdr) + out_len)) {
-        g_message("[%s] send failed: %s", c->macstr, g_strerror(errno));
-        sremfb_schedule_client_lost(c);
-        return FALSE;
-    }
-    c->st_rects++;
-    c->st_wire_bytes += sizeof(*hdr) + out_len;
-    c->st_raw_bytes += raw_len;
-    c->wire_total += sizeof(*hdr) + out_len;
-    return TRUE;
-}
-
-/* Payload-less control message (BLANK/UNBLANK). */
+/* Payload-less control message (BLANK/UNBLANK), through the queue. */
 static void send_ctrl(SremfbClient *c, uint8_t encoding)
 {
     struct sremfb_frame_hdr hdr = {0};
@@ -124,117 +82,12 @@ static void send_ctrl(SremfbClient *c, uint8_t encoding)
         return;
     hdr.magic = SREMFB_MAGIC;
     hdr.encoding = encoding;
-    if (!net_send_all(c->fd, &hdr, sizeof(hdr))) {
-        g_message("[%s] send failed: %s", c->macstr, g_strerror(errno));
-        sremfb_schedule_client_lost(c);
-        return;
-    }
-    c->wire_total += sizeof(hdr);
-}
-
-/* ----------------------------------------------- H.264 transmit path */
-
-/* One full-frame access unit. The encoder's skip blocks make frames with
- * little damage nearly free, so staying damage-driven costs nothing. */
-static gboolean send_h264_frame(SremfbClient *c)
-{
-    uint32_t w = (uint32_t)c->mode.width, h = (uint32_t)c->mode.height;
-    size_t luma = (size_t)w * h;
-    size_t chroma = (size_t)((w + 1) / 2) * ((h + 1) / 2);
-    uint8_t *y = c->yuvbuf, *u = y + luma, *v = u + chroma;
-    uint8_t *nal = NULL;
-    int is_idr = 0;
-
-    sremfb_convert_bgrx_to_i420(y, u, v, c->grabbuf, w, h);
-    int sz = sremfb_enc_encode(c->enc, y, u, v, c->force_idr, &nal, &is_idr);
-    c->force_idr = FALSE;
-    if (sz < 0) {
-        g_warning("[%s] x264 encode failed, falling back to raw", c->macstr);
-        c->h264_failed = TRUE;
-        sremfb_xmit_set_mode(c, SREMFB_XMIT_RAW);
-        return TRUE;                   /* the snapshot repainted everything */
-    }
-    if (sz == 0)
-        return TRUE;                   /* nothing out (shouldn't happen) */
-
-    struct sremfb_frame_hdr hdr = {0};
-    hdr.magic = SREMFB_MAGIC;
-    hdr.encoding = SREMFB_ENC_H264;
-    hdr.reserved[0] = is_idr ? SREMFB_H264_FLAG_IDR : 0;
-    hdr.w = (uint16_t)w;
-    hdr.h = (uint16_t)h;
-    hdr.payload_len = (uint32_t)sz;
-
-    if (!net_send_all(c->fd, &hdr, sizeof(hdr)) ||
-        !net_send_all(c->fd, nal, (size_t)sz)) {
-        g_message("[%s] send failed: %s", c->macstr, g_strerror(errno));
-        sremfb_schedule_client_lost(c);
-        return FALSE;
-    }
-    c->st_rects++;
-    c->st_wire_bytes += sizeof(hdr) + (size_t)sz;
-    c->wire_total += sizeof(hdr) + (size_t)sz;
-    c->last_enc_us = g_get_monotonic_time();
-    return TRUE;
-}
-
-/* Converts and sends the whole grabbuf as one RAW/LZ4 rect — the
- * deterministic repaint that closes an H.264 episode. */
-static gboolean send_full_snapshot(SremfbClient *c)
-{
-    unsigned bytespp = (c->hello.pixfmt == SREMFB_PIX_RGB565) ? 2 : 4;
-    uint32_t w = (uint32_t)c->mode.width, h = (uint32_t)c->mode.height;
-
-    if (!c->grabbuf || !c->rectbuf)
-        return TRUE;
-    for (uint32_t row = 0; row < h; row++)
-        sremfb_convert_bgrx_row(c->rectbuf + (size_t)row * w * bytespp,
-                                c->grabbuf + (size_t)row * w * 4,
-                                w, c->hello.pixfmt, 0, row);
-    return send_rect(c, 0, 0, w, h, (size_t)w * h * bytespp);
-}
-
-/* Mode switch, called by the controller (and by encode failures).
- * RAW -> H264: the first AU is an IDR, so it repaints the full frame and
- * there is no visual gap. H264 -> RAW: an EOS tells the client to drain
- * and display everything its decoder holds, then a full RAW/LZ4 snapshot
- * makes the screen pixel-exact before normal rects resume. */
-void sremfb_xmit_set_mode(SremfbClient *c, SremfbXmitMode mode)
-{
-    if (c->xmit_mode == mode || c->state != SREMFB_CLIENT_STREAMING)
-        return;
-
-    if (mode == SREMFB_XMIT_H264) {
-        uint32_t w = (uint32_t)c->mode.width, h = (uint32_t)c->mode.height;
-        if (!c->enc) {
-            int kbps = sremfb_ctl_initial_kbps(c);
-            c->enc = sremfb_enc_open((int)w, (int)h, kbps);
-            if (!c->enc) {
-                g_warning("[%s] x264 init failed, staying raw", c->macstr);
-                c->h264_failed = TRUE;
-                return;
-            }
-            size_t luma = (size_t)w * h;
-            size_t chroma = (size_t)((w + 1) / 2) * ((h + 1) / 2);
-            c->yuvbuf = g_malloc(luma + 2 * chroma);
-            g_message("[%s] switching to H.264 at %d kbps", c->macstr, kbps);
-        } else {
-            g_message("[%s] switching to H.264 at %d kbps", c->macstr,
-                      sremfb_enc_bitrate(c->enc));
-        }
-        c->force_idr = TRUE;
-        c->xmit_mode = SREMFB_XMIT_H264;
-    } else {
-        g_message("[%s] switching back to raw", c->macstr);
-        c->xmit_mode = SREMFB_XMIT_RAW;
-        send_ctrl(c, SREMFB_ENC_H264_EOS);
-        if (c->fd >= 0 && !c->lost_id)
-            send_full_snapshot(c);
-    }
+    sremfb_xmit_ctrl(c, &hdr, sizeof(hdr));
 }
 
 /* Grabs the pending damage (consuming it even if the client just left)
- * and streams each dirty rect. */
+ * and hands it to the transmit queue — nothing is sent from here, the
+ * frames are built when each client's socket can take them (xmit.c). */
 static void grab_and_send(SremfbClient *c)
 {
     struct evdi_rect rects[MAX_GRAB_RECTS];
@@ -247,50 +100,8 @@ static void grab_and_send(SremfbClient *c)
     if (num <= 0 || c->fd < 0 || c->state != SREMFB_CLIENT_STREAMING)
         return;
 
-    guint64 wire0 = c->st_wire_bytes;
-    size_t raw_damage = 0;
-
-    if (c->xmit_mode == SREMFB_XMIT_H264) {
-        /* the rects only matter as "something changed" + the RAW-cost
-         * estimate feeding the switch-back predictor */
-        for (int i = 0; i < num; i++) {
-            uint32_t w = (uint32_t)CLAMP(rects[i].x2 - rects[i].x1, 0,
-                                         c->mode.width);
-            uint32_t h = (uint32_t)CLAMP(rects[i].y2 - rects[i].y1, 0,
-                                         c->mode.height);
-            raw_damage += (size_t)w * h * bytespp;
-        }
-        /* pipe behind (network or client decoder): let the damage
-         * coalesce, the next P-frame will carry it all */
-        if (sremfb_ctl_skip_encode(c))
-            return;
-        if (!send_h264_frame(c))
-            return;
-    } else {
-        for (int i = 0; i < num; i++) {
-            uint32_t x1 = (uint32_t)CLAMP(rects[i].x1, 0, c->mode.width);
-            uint32_t y1 = (uint32_t)CLAMP(rects[i].y1, 0, c->mode.height);
-            uint32_t x2 = (uint32_t)CLAMP(rects[i].x2, 0, c->mode.width);
-            uint32_t y2 = (uint32_t)CLAMP(rects[i].y2, 0, c->mode.height);
-            uint32_t w = x2 > x1 ? x2 - x1 : 0;
-            uint32_t h = y2 > y1 ? y2 - y1 : 0;
-
-            if (w == 0 || h == 0)
-                continue;
-            for (uint32_t row = 0; row < h; row++)
-                sremfb_convert_bgrx_row(
-                    c->rectbuf + (size_t)row * w * bytespp,
-                    c->grabbuf + ((size_t)(y1 + row) * c->mode.width + x1) * 4,
-                    w, c->hello.pixfmt, x1, y1 + row);
-            raw_damage += (size_t)w * h * bytespp;
-            if (!send_rect(c, x1, y1, w, h, (size_t)w * h * bytespp))
-                return;
-        }
-    }
     c->st_grabs++;
-    if (c->feedback)
-        sremfb_ctl_on_grab(c, raw_damage,
-                           (size_t)(c->st_wire_bytes - wire0));
+    sremfb_xmit_damage(c, rects, num, bytespp);
     send_stats(c);
 }
 
@@ -357,6 +168,10 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         g_warning("[%s] unexpected pixel format, assuming BGRx byte order",
                   c->macstr);
 
+    /* the wire buffers are about to be rebuilt: drop anything in
+     * flight that points into them */
+    sremfb_xmit_reset(c);
+
     /* a resolution change invalidates the encoder and the H.264 episode */
     if (c->enc && (mode.width != c->mode.width ||
                    mode.height != c->mode.height)) {
@@ -377,6 +192,8 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
     }
     g_free(c->grabbuf);
     c->grabbuf = g_malloc((size_t)mode.width * mode.height * 4);
+    g_free(c->shadowbuf);
+    c->shadowbuf = g_malloc0((size_t)mode.width * mode.height * 4);
 
     struct evdi_buffer buf = {
         .id = GRAB_BUFFER_ID,
@@ -404,12 +221,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
             getenv("SREMFB_NO_H264") == NULL)
             flags |= SREMFB_SRV_FLAG_H264;
         g_clear_handle_id(&c->mode_timeout_id, g_source_remove);
-        if (!net_send_server_hello(c->fd, (uint16_t)mode.width,
-                                   (uint16_t)mode.height, c->hello.pixfmt,
-                                   SREMFB_STATUS_OK, flags)) {
-            sremfb_schedule_client_lost(c);
-            return;
-        }
+        sremfb_xmit_hello(c, flags);
         c->state = SREMFB_CLIENT_STREAMING;
         c->st_grabs = c->st_rects = c->st_wire_bytes = c->st_raw_bytes = 0;
         c->st_since_us = g_get_monotonic_time();
@@ -576,6 +388,7 @@ void sremfb_evdi_plug(SremfbClient *c)
  * will restore the layout on the next plug (stable EDID identity). */
 void sremfb_evdi_unplug(SremfbClient *c)
 {
+    sremfb_xmit_reset(c);
     sremfb_ctl_stop(c);
     g_clear_handle_id(&c->mode_timeout_id, g_source_remove);
     g_clear_handle_id(&c->kick_id, g_source_remove);
@@ -584,6 +397,7 @@ void sremfb_evdi_unplug(SremfbClient *c)
         c->grab_registered = FALSE;
     }
     g_clear_pointer(&c->grabbuf, g_free);
+    g_clear_pointer(&c->shadowbuf, g_free);
     g_clear_pointer(&c->rectbuf, g_free);
     g_clear_pointer(&c->sendbuf, g_free);
     c->rectbuf_size = c->sendbuf_size = 0;

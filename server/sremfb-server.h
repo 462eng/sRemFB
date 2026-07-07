@@ -70,6 +70,10 @@ struct SremfbClient {
     gboolean mode_valid;
     gboolean grab_registered;
     uint8_t *grabbuf;          /* BGRx buffer registered with evdi */
+    uint8_t *shadowbuf;        /* what the client last got (BGRx): damage
+                                  is trimmed against it, because mutter
+                                  fans some animations out as full-frame
+                                  damage with identical pixels */
     gboolean update_pending;   /* update requested, update_ready will fire */
     guint kick_id;             /* deferred next update request (g_idle) */
     guint mode_timeout_id;     /* answers SERVER_FAIL if the compositor
@@ -79,6 +83,25 @@ struct SremfbClient {
     uint8_t *rectbuf;          /* one converted rect, client pixel format */
     uint8_t *sendbuf;          /* sremfb_frame_hdr + payload for one rect */
     size_t rectbuf_size, sendbuf_size;
+
+    /* non-blocking transmit (xmit.c). Control messages are queued
+     * verbatim; frame data is never queued — damage accumulates in
+     * dirty[] and the next frame is built from the *current* grabbuf
+     * only when the socket can take it. A slow client therefore
+     * receives coalesced frames instead of stalling the main loop
+     * (the head-of-line fix). */
+    GQueue outq;               /* GBytes*: PING/BLANK/EOS/hello, in order */
+    size_t outq_off;           /* progress inside the queue head */
+    const uint8_t *out_seg[2]; /* frame being sent (hdr + payload) */
+    size_t out_seg_len[2];
+    size_t out_off;            /* progress across both segments */
+    gboolean out_active;       /* a frame is partially sent */
+    guint out_watch_id;        /* G_IO_OUT watch, armed while work pends */
+    guint out_retry_id;        /* encode-pacing retry (decoder behind) */
+    struct evdi_rect dirty[16];
+    int dirty_n;
+    gboolean dirty_all;        /* full frame pending (H.264 / snapshot) */
+    size_t dirty_raw;          /* damage bytes accumulated since last build */
 
     /* negotiated feature bits (v2 + hello flags) */
     gboolean feedback;         /* client echoes PING as PONG */
@@ -104,12 +127,12 @@ struct SremfbClient {
     guint64 ping_wire_mark;    /* st lifetime wire bytes at last ping */
     guint64 wire_total;        /* lifetime wire bytes (never reset) */
     double delay_ewma_us;      /* echo delay, the pressure signal */
-    double sendstall_ewma_us;  /* time blocked inside net_send_all */
     double capacity_Bps;       /* wire rate observed while saturated */
     double lz4_ratio_ewma;     /* raw/wire, learned in RAW mode */
     double raw_rate_Bps;       /* damage byte rate (pre-compression) */
-    double grab_fps;           /* delivered frame rate (sends block) */
-    gint64 last_grab_us;
+    double grab_fps;           /* delivered frame rate (build pace) */
+    gint64 last_grab_us;       /* last damage seen (continuity) */
+    gint64 last_deliver_us;    /* last frame built (fps) */
     gint64 damage_cont_us;     /* start of the current continuous-damage run */
     gint64 cap_win_start_us;   /* rate sampling window */
     guint64 cap_win_bytes;     /* wire bytes in the window */
@@ -164,7 +187,12 @@ int      net_accept_and_hello(SremfbServer *srv, int listen_fd,
                               struct sremfb_client_hello *hello,
                               char *peer, size_t peer_len);
 gboolean net_send_all(int fd, const void *buf, size_t len);
+ssize_t  net_send_some(int fd, const void *buf, size_t len);
 gboolean net_send_server_hello(int fd, uint16_t width, uint16_t height,
+                               uint8_t pixfmt, uint16_t status,
+                               uint8_t flags);
+void     net_fill_server_hello(struct sremfb_server_hello *sh,
+                               uint16_t width, uint16_t height,
                                uint8_t pixfmt, uint16_t status,
                                uint8_t flags);
 gboolean net_allow_parse(SremfbServer *srv, const char *spec);
@@ -201,13 +229,19 @@ void sremfb_enc_close(struct SremfbEncoder *e);
 void        sremfb_ctl_start(SremfbClient *c);    /* at STREAMING entry */
 void        sremfb_ctl_stop(SremfbClient *c);     /* at teardown */
 void        sremfb_ctl_on_pong(SremfbClient *c, uint64_t t_echo_us);
-void        sremfb_ctl_on_grab(SremfbClient *c, size_t raw_bytes,
-                               size_t wire_bytes);
+void        sremfb_ctl_on_damage(SremfbClient *c, size_t raw_bytes);
+void        sremfb_ctl_on_deliver(SremfbClient *c, size_t wire_bytes);
 int         sremfb_ctl_initial_kbps(const SremfbClient *c);
 gboolean    sremfb_ctl_skip_encode(SremfbClient *c);
 const char *sremfb_ctl_state_name(const SremfbClient *c);
 
-/* evdi.c — mode switching needs these */
+/* xmit.c — per-client non-blocking transmit queue */
+void sremfb_xmit_damage(SremfbClient *c, const struct evdi_rect *rects,
+                        int num, unsigned bytespp);
+void sremfb_xmit_ctrl(SremfbClient *c, const void *msg, size_t len);
+void sremfb_xmit_hello(SremfbClient *c, uint8_t flags);
 void sremfb_xmit_set_mode(SremfbClient *c, SremfbXmitMode mode);
+void sremfb_xmit_kick(SremfbClient *c);      /* (re)arm the drain */
+void sremfb_xmit_reset(SremfbClient *c);     /* teardown / mode change */
 
 #endif /* SREMFB_SERVER_H */

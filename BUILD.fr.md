@@ -111,7 +111,7 @@ cibles d'installation.
 | `sremfb-client` | armhf | SBC ARMv7 (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.1.3 par défaut
+./pkg/build-debs.sh              # version 1.2.0 par défaut
 ./pkg/build-debs.sh 3.1.0        # version explicite
 ```
 
@@ -151,9 +151,9 @@ surchargez-le via la variable d'environnement `MAINT`
 
 ```sh
 # serveur
-sudo apt install ./dist/sremfb-server_1.1.3_amd64.deb
+sudo apt install ./dist/sremfb-server_1.2.0_amd64.deb
 # client (sur le SBC)
-sudo apt install ./dist/sremfb-client_1.1.3_arm64.deb
+sudo apt install ./dist/sremfb-client_1.2.0_arm64.deb
 ```
 
 Sur une conf déjà modifiée, `dpkg -i --force-confold` conserve le fichier

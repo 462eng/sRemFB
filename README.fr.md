@@ -187,12 +187,12 @@ indépendante).
 - Débit : à 1080p/32bpp une frame pleine fait ~8,3 Mo, mais grâce au
   damage seuls les rectangles modifiés partent sur le fil. En RGB565
   c'est moitié moins. Contenu statique : zéro trafic.
-- Limite connue : les envois sont bloquants, donc un client congestionné
-  ou mort peut retarder les autres jusqu'au `SO_SNDTIMEO` (20 s) —
-  *head-of-line blocking*. Correctif possible (non implémenté) : sockets
-  non bloquantes + buffer « dernière frame » par client. Le H.264
-  adaptatif réduit d'un ordre de grandeur les envois des clients qui en
-  ont besoin, ce qui atténue le problème en pratique.
+- Un client lent ne retarde jamais les autres : les envois sont **non
+  bloquants**, chaque client a sa propre file. Le damage s'y accumule en
+  région sale et la frame suivante n'est construite (conversion, LZ4 ou
+  encodage) que quand sa socket peut la prendre, **depuis les pixels les
+  plus frais** — un client à la traîne reçoit moins de frames, jamais
+  des frames périmées, et les autres ne voient rien.
 
 ## Licence
 

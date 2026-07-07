@@ -40,6 +40,7 @@ void sremfb_client_lost(SremfbClient *c)
 {
     g_clear_handle_id(&c->lost_id, g_source_remove);
     g_clear_handle_id(&c->watch_id, g_source_remove);
+    sremfb_xmit_reset(c);
     if (c->fd >= 0) {
         close(c->fd);
         c->fd = -1;
