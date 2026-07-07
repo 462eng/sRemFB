@@ -463,6 +463,41 @@ static gboolean on_evdi_ready(gint fd, GIOCondition cond, gpointer data)
 
 /* ------------------------------------------------- connector control */
 
+/* Self-heal: when every device we could hand out is wedged (mutter's
+ * EBUSY-on-reopen bug — typically after the boot-time reset raced the
+ * compositor's own enumeration), create a brand-new device. mutter
+ * accepts a freshly created card but closes it again after ~10 s of
+ * inactivity, so this only works because the client's retry lands
+ * within a few seconds. Bounded: a poisoned minor number can burn an
+ * attempt or two ("device already present" in the mutter journal). */
+static void self_heal(SremfbServer *srv)
+{
+    for (guint i = 0; i < srv->devices->len; i++) {
+        SremfbEvdiDevice *dev = g_ptr_array_index(srv->devices, i);
+        if (!dev->owner && !dev->suspect)
+            return;                    /* a clean device remains */
+    }
+    if (srv->selfheal_left == 0) {
+        g_warning("all EVDI devices are wedged and the self-heal budget "
+                  "is spent — a session re-login will clear mutter");
+        return;
+    }
+
+    int fd = open("/sys/devices/evdi/add", O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        g_warning("cannot add a fresh evdi device (%s) — is "
+                  "sremfb-evdi-perms.service active?", g_strerror(errno));
+        return;
+    }
+    if (write(fd, "1", 1) < 0)
+        g_warning("evdi add failed: %s", g_strerror(errno));
+    else
+        g_message("all usable EVDI devices wedged: added a fresh one for "
+                  "the client's retry (%u self-heal(s) left)",
+                  --srv->selfheal_left);
+    close(fd);
+}
+
 static gboolean on_mode_timeout(gpointer data)
 {
     SremfbClient *c = data;
@@ -476,6 +511,7 @@ static gboolean on_mode_timeout(gpointer data)
         c->dev->suspect = TRUE;
         g_warning("[%s] quarantining /dev/dri/card%d", c->macstr,
                   c->dev->card);
+        self_heal(c->srv);
     }
     if (c->fd >= 0)
         net_send_server_hello(c->fd, 0, 0, 0, SREMFB_STATUS_SERVER_FAIL, 0);

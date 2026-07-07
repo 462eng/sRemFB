@@ -152,13 +152,15 @@ position).
 
 > **mutter gotcha.** mutter does not survive reopening an EVDI device it
 > was already driving ("Failed to reopen cardN: EBUSY", then hotplugs on
-> that card are ignored). The server guards against this three ways:
+> that card are ignored). The server guards against this four ways:
 > devices are kept open in a pool for the whole process lifetime; devices
 > are **regenerated from scratch on every startup** (a boot-time service,
 > `sremfb-evdi-perms.service`, opens `/sys/devices/evdi/{add,remove_all}`
-> to the `video` group — the session user must be a member); and as a last
-> resort, devices that fail to light up within 10 s are quarantined (the
-> client's next reconnect picks another one).
+> to the `video` group — the session user must be a member); devices that
+> fail to light up within 10 s are quarantined (the client's next
+> reconnect picks another one); and when no clean device remains, the
+> server **self-heals** by creating a fresh one for that retry (bounded —
+> if the budget runs out, a session re-login clears mutter).
 
 ## Notes
 

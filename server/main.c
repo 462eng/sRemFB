@@ -24,6 +24,7 @@
 
 static SremfbServer server = {
     .listen_fd = -1,
+    .selfheal_left = 8,
 };
 
 static gboolean mac_is_zero(const uint8_t mac[6])

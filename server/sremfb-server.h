@@ -143,6 +143,8 @@ struct SremfbServer {
 
     SremfbAllowNet *allow;     /* empty = allow everyone */
     unsigned n_allow;
+
+    unsigned selfheal_left;    /* fresh-device additions still allowed */
 };
 
 #define SREMFB_MAX_CLIENTS 8

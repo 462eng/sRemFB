@@ -150,13 +150,15 @@ indépendante).
 
 > **Piège mutter.** mutter ne survit pas à la réouverture d'un device
 > EVDI déjà piloté (« Failed to reopen cardN: EBUSY » puis hotplugs
-> ignorés sur cette card). Le serveur s'en protège trois fois : devices
+> ignorés sur cette card). Le serveur s'en protège quatre fois : devices
 > gardés ouverts en pool toute la vie du process ; devices **régénérés à
 > neuf à chaque démarrage** (un service au boot, `sremfb-evdi-perms.service`,
 > ouvre `/sys/devices/evdi/{add,remove_all}` au groupe `video` —
-> l'utilisateur de session doit en faire partie) ; et en secours,
-> quarantaine des devices qui ne s'allument pas en 10 s (la reconnexion du
-> client en prend un autre).
+> l'utilisateur de session doit en faire partie) ; quarantaine des devices
+> qui ne s'allument pas en 10 s (la reconnexion du client en prend un
+> autre) ; et quand plus aucun device sain ne reste, le serveur
+> **s'auto-guérit** en créant un device neuf pour ce retry (borné — budget
+> épuisé, une reconnexion de session remet mutter d'aplomb).
 
 ## Notes
 
