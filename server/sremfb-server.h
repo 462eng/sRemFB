@@ -145,6 +145,8 @@ struct SremfbServer {
     unsigned n_allow;
 
     unsigned selfheal_left;    /* fresh-device additions still allowed */
+    gboolean wedge_seen;       /* a mode-timeout happened: distrust the
+                                  pre-existing free devices */
 };
 
 #define SREMFB_MAX_CLIENTS 8

@@ -156,9 +156,11 @@ indépendante).
 > ouvre `/sys/devices/evdi/{add,remove_all}` au groupe `video` —
 > l'utilisateur de session doit en faire partie) ; quarantaine des devices
 > qui ne s'allument pas en 10 s (la reconnexion du client en prend un
-> autre) ; et quand plus aucun device sain ne reste, le serveur
-> **s'auto-guérit** en créant un device neuf pour ce retry (borné — budget
-> épuisé, une reconnexion de session remet mutter d'aplomb).
+> autre) ; et dès qu'un grippage a été constaté, le serveur
+> **s'auto-guérit** : il crée un device tout neuf au moment de
+> l'acquisition et le branche immédiatement — mutter n'accepte une carte
+> que quelques secondes après sa création (budget borné ; épuisé, une
+> reconnexion de session remet mutter d'aplomb).
 
 ## Notes
 

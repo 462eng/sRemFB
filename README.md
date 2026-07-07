@@ -158,9 +158,11 @@ position).
 > `sremfb-evdi-perms.service`, opens `/sys/devices/evdi/{add,remove_all}`
 > to the `video` group — the session user must be a member); devices that
 > fail to light up within 10 s are quarantined (the client's next
-> reconnect picks another one); and when no clean device remains, the
-> server **self-heals** by creating a fresh one for that retry (bounded —
-> if the budget runs out, a session re-login clears mutter).
+> reconnect picks another one); and once a wedge has been seen, the
+> server **self-heals**: it creates a brand-new device at acquire time
+> and plugs it immediately — mutter only accepts a card for a few
+> seconds after its creation (bounded budget; if it runs out, a session
+> re-login clears mutter).
 
 ## Notes
 

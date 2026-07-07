@@ -463,39 +463,52 @@ static gboolean on_evdi_ready(gint fd, GIOCondition cond, gpointer data)
 
 /* ------------------------------------------------- connector control */
 
-/* Self-heal: when every device we could hand out is wedged (mutter's
- * EBUSY-on-reopen bug — typically after the boot-time reset raced the
- * compositor's own enumeration), create a brand-new device. mutter
- * accepts a freshly created card but closes it again after ~10 s of
- * inactivity, so this only works because the client's retry lands
- * within a few seconds. Bounded: a poisoned minor number can burn an
- * attempt or two ("device already present" in the mutter journal). */
-static void self_heal(SremfbServer *srv)
+/* Self-heal: once a mode-timeout proved that mutter wedges on the
+ * devices we inherited (EBUSY on reopen — typically after a server
+ * restart, or when the boot-time reset raced the compositor's own
+ * enumeration), stop trusting pre-existing free devices: create a
+ * brand-new one at acquire time and plug it immediately. mutter accepts
+ * a freshly created card but closes it again within a few seconds of
+ * inactivity, so creating it while the client connection is already in
+ * hand (plug follows in <1 s) is the only reliable timing. Bounded: a
+ * reused minor number can still be stale for mutter ("device already
+ * present" in its journal) and burn an attempt. Returns the new card
+ * index, or -1. */
+static int self_heal_add(SremfbServer *srv)
 {
-    for (guint i = 0; i < srv->devices->len; i++) {
-        SremfbEvdiDevice *dev = g_ptr_array_index(srv->devices, i);
-        if (!dev->owner && !dev->suspect)
-            return;                    /* a clean device remains */
-    }
+    gboolean existed[32] = { FALSE };
+
     if (srv->selfheal_left == 0) {
-        g_warning("all EVDI devices are wedged and the self-heal budget "
-                  "is spent — a session re-login will clear mutter");
-        return;
+        g_warning("self-heal budget spent — a session re-login will "
+                  "clear mutter");
+        return -1;
     }
+    for (int i = 0; i < 32; i++)
+        existed[i] = evdi_check_device(i) == AVAILABLE;
 
     int fd = open("/sys/devices/evdi/add", O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
         g_warning("cannot add a fresh evdi device (%s) — is "
                   "sremfb-evdi-perms.service active?", g_strerror(errno));
-        return;
+        return -1;
     }
-    if (write(fd, "1", 1) < 0)
+    if (write(fd, "1", 1) < 0) {
         g_warning("evdi add failed: %s", g_strerror(errno));
-    else
-        g_message("all usable EVDI devices wedged: added a fresh one for "
-                  "the client's retry (%u self-heal(s) left)",
-                  --srv->selfheal_left);
+        close(fd);
+        return -1;
+    }
     close(fd);
+    srv->selfheal_left--;
+
+    /* the node appears asynchronously (udev) */
+    for (int tries = 0; tries < 40; tries++) {
+        for (int i = 0; i < 32; i++)
+            if (!existed[i] && evdi_check_device(i) == AVAILABLE)
+                return i;
+        g_usleep(50 * 1000);
+    }
+    g_warning("fresh evdi device never appeared");
+    return -1;
 }
 
 static gboolean on_mode_timeout(gpointer data)
@@ -507,11 +520,12 @@ static gboolean on_mode_timeout(gpointer data)
               "(is a Wayland/GNOME session running?)", c->macstr);
     if (c->dev) {
         /* mutter probably hit its EBUSY-on-reopen bug on this card:
-         * quarantine it so the client's retry lands on another device */
+         * quarantine it so the client's retry lands on another device,
+         * and let the next acquire self-heal with a fresh device */
         c->dev->suspect = TRUE;
+        c->srv->wedge_seen = TRUE;
         g_warning("[%s] quarantining /dev/dri/card%d", c->macstr,
                   c->dev->card);
-        self_heal(c->srv);
     }
     if (c->fd >= 0)
         net_send_server_hello(c->fd, 0, 0, 0, SREMFB_STATUS_SERVER_FAIL, 0);
@@ -658,6 +672,37 @@ static gboolean acquire_pooled(SremfbClient *c, gboolean allow_suspect)
     return FALSE;
 }
 
+/* Opens card index i into the pool for client c. */
+static gboolean acquire_card(SremfbClient *c, int i, const char *how)
+{
+    char path[32];
+
+    g_snprintf(path, sizeof(path), "/dev/dri/card%d", i);
+    int lock_fd = open(path, O_RDWR | O_CLOEXEC);
+    if (lock_fd < 0)
+        return FALSE;
+    if (flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
+        close(lock_fd);                /* claimed by another process/us */
+        return FALSE;
+    }
+    evdi_handle handle = evdi_open(i);
+    if (!handle) {
+        close(lock_fd);
+        return FALSE;
+    }
+    SremfbEvdiDevice *dev = g_new0(SremfbEvdiDevice, 1);
+    dev->handle = handle;
+    dev->card = i;
+    dev->lock_fd = lock_fd;
+    dev->owner = c;
+    dev->watch_id = g_unix_fd_add(evdi_get_event_ready(handle),
+                                  G_IO_IN, on_evdi_ready, dev);
+    g_ptr_array_add(c->srv->devices, dev);
+    c->dev = dev;
+    g_message("[%s] using evdi device /dev/dri/card%d%s", c->macstr, i, how);
+    return TRUE;
+}
+
 gboolean sremfb_evdi_acquire(SremfbClient *c)
 {
     SremfbServer *srv = c->srv;
@@ -665,35 +710,20 @@ gboolean sremfb_evdi_acquire(SremfbClient *c)
     if (acquire_pooled(c, FALSE))
         return TRUE;
 
-    for (int i = 0; i < 32; i++) {
-        char path[32];
+    /* Once a wedge was seen, pre-existing free devices are mutter
+     * minefields: hand out a brand-new one instead — created right now,
+     * so the EDID plug lands within mutter's short acceptance window. */
+    if (srv->wedge_seen) {
+        int fresh = self_heal_add(srv);
+        if (fresh >= 0 && acquire_card(c, fresh, " (fresh, self-heal)"))
+            return TRUE;
+    }
 
+    for (int i = 0; i < 32; i++) {
         if (evdi_check_device(i) != AVAILABLE)
             continue;
-        g_snprintf(path, sizeof(path), "/dev/dri/card%d", i);
-        int lock_fd = open(path, O_RDWR | O_CLOEXEC);
-        if (lock_fd < 0)
-            continue;
-        if (flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
-            close(lock_fd);            /* claimed by another process/us */
-            continue;
-        }
-        evdi_handle handle = evdi_open(i);
-        if (!handle) {
-            close(lock_fd);
-            continue;
-        }
-        SremfbEvdiDevice *dev = g_new0(SremfbEvdiDevice, 1);
-        dev->handle = handle;
-        dev->card = i;
-        dev->lock_fd = lock_fd;
-        dev->owner = c;
-        dev->watch_id = g_unix_fd_add(evdi_get_event_ready(handle),
-                                      G_IO_IN, on_evdi_ready, dev);
-        g_ptr_array_add(srv->devices, dev);
-        c->dev = dev;
-        g_message("[%s] using evdi device /dev/dri/card%d", c->macstr, i);
-        return TRUE;
+        if (acquire_card(c, i, ""))
+            return TRUE;
     }
 
     /* nothing clean left: a quarantined card is better than a refusal */
