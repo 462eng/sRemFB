@@ -10,6 +10,17 @@
  * server derives the EDID serial from it, so each physical client is a
  * distinct monitor with its own remembered position), and the server can
  * send explicit BLANK/UNBLANK control messages (DPMS pass-through).
+ *
+ * v2 feature bits (still proto_ver 2 — negotiated through hello flags,
+ * safe with either side older):
+ *   - FEEDBACK: the server may interleave PING control messages in the
+ *     frame stream; the client echoes each one back as a PONG (its first
+ *     and only upstream message beyond the hello). Because TCP is ordered,
+ *     the echo time measures the end-to-end delay of the whole queue in
+ *     front of it — the congestion signal driving the adaptive encoder.
+ *   - H264: the server may switch the stream to H.264 video (one Annex B
+ *     access unit per message) when the measured delay says the raw path
+ *     can't keep up, and back when the pressure subsides.
  */
 #ifndef SREMFB_PROTOCOL_H
 #define SREMFB_PROTOCOL_H
@@ -31,10 +42,34 @@ enum sremfb_encoding {
     SREMFB_ENC_LZ4     = 1,   /* payload = one LZ4 block of those raw pixels */
     SREMFB_ENC_BLANK   = 2,   /* no payload: turn the panel off (DPMS off) */
     SREMFB_ENC_UNBLANK = 3,   /* no payload: turn the panel back on */
+    SREMFB_ENC_PING    = 4,   /* payload = u64 LE, the server's monotonic
+                                 clock in µs; echo it back verbatim in a
+                                 PONG client message. 0x0 rect. */
+    SREMFB_ENC_H264    = 5,   /* payload = one H.264 Annex B access unit
+                                 (4:2:0, no B-frames, decode order = display
+                                 order); rect is always the full stream.
+                                 reserved[0] carries SREMFB_H264_FLAG_*. */
+    SREMFB_ENC_H264_EOS = 6,  /* no payload: the H.264 episode is over —
+                                 drain the decoder, display everything, then
+                                 resume; the next message repaints the full
+                                 frame in RAW/LZ4. */
 };
 
+/* SREMFB_ENC_H264 frame_hdr.reserved[0] bits (informational) */
+#define SREMFB_H264_FLAG_IDR (1u << 0)    /* access unit starts with an IDR */
+
 /* client hello flags */
-#define SREMFB_HELLO_FLAG_LZ4 (1u << 0)   /* client accepts SREMFB_ENC_LZ4 */
+#define SREMFB_HELLO_FLAG_LZ4      (1u << 0)  /* client accepts SREMFB_ENC_LZ4 */
+#define SREMFB_HELLO_FLAG_FEEDBACK (1u << 1)  /* client echoes PING as PONG */
+#define SREMFB_HELLO_FLAG_H264     (1u << 2)  /* client can decode
+                                                 SREMFB_ENC_H264 at its
+                                                 resolution (implies it also
+                                                 handles H264_EOS) */
+
+/* server hello flags (the server only sets a bit when the client
+ * advertised the matching capability) */
+#define SREMFB_SRV_FLAG_PING (1u << 0)    /* PING messages may appear */
+#define SREMFB_SRV_FLAG_H264 (1u << 1)    /* the stream may switch to H.264 */
 
 /* Server hello status codes. */
 enum sremfb_status {
@@ -70,7 +105,9 @@ struct sremfb_server_hello {
     uint16_t status;           /* enum sremfb_status; nonzero => close */
     uint16_t width, height;    /* negotiated stream size (normally xres,yres) */
     uint8_t  pixfmt;           /* wire pixel format of the frames that follow */
-    uint8_t  reserved[3];
+    uint8_t  flags;            /* SREMFB_SRV_FLAG_* (was reserved, always 0
+                                  from older servers) */
+    uint8_t  reserved[2];
 } __attribute__((packed));
 
 /* server -> client, one per message, followed by payload_len bytes.
@@ -83,8 +120,23 @@ struct sremfb_frame_hdr {
     uint32_t payload_len;      /* RAW: w*h*bytespp; BLANK/UNBLANK: 0 */
 } __attribute__((packed));
 
+/* client -> server, only when the server advertised SREMFB_SRV_FLAG_PING.
+ * Sent at the client's position in its receive stream, so the server-side
+ * (now - t_echo_us) covers every byte that was queued ahead of the PING. */
+enum sremfb_cmsg_type {
+    SREMFB_CMSG_PONG = 1,
+};
+
+struct sremfb_client_msg {
+    uint32_t magic;            /* SREMFB_MAGIC */
+    uint8_t  type;             /* enum sremfb_cmsg_type */
+    uint8_t  reserved[3];
+    uint64_t t_echo_us;        /* PONG: the PING payload, verbatim */
+} __attribute__((packed));
+
 _Static_assert(sizeof(struct sremfb_client_hello) == 48, "client hello size");
 _Static_assert(sizeof(struct sremfb_server_hello) == 16, "server hello size");
 _Static_assert(sizeof(struct sremfb_frame_hdr)   == 20, "frame header size");
+_Static_assert(sizeof(struct sremfb_client_msg)  == 16, "client msg size");
 
 #endif /* SREMFB_PROTOCOL_H */

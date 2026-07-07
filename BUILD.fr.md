@@ -15,12 +15,14 @@ propre `Makefile` si on ne veut qu'un côté.
 ### Serveur (PC)
 
 ```sh
-sudo apt install build-essential libglib2.0-dev liblz4-dev \
+sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
                  evdi-dkms libevdi-dev
 ```
 
 - `glib-2.0` — boucle d'événements, sources, utilitaires.
 - `liblz4` — compression des rectangles.
+- `libx264` — encodage H.264 du chemin de compression adaptative
+  (enclenché par client, sous congestion mesurée).
 - `libevdi` + `evdi-dkms` — le module noyau EVDI (pilote DisplayLink) et
   sa bibliothèque. `evdi-dkms` compile le module pour le noyau courant ;
   un `dkms` fonctionnel et les en-têtes noyau sont donc requis.
@@ -37,8 +39,9 @@ sudo apt install build-essential liblz4-dev
 ```
 
 Le client est volontairement du C pur : pas de GLib, pas de DRM, rien
-d'autre que la libc et lz4. Il compile tel quel sur Debian, Raspberry Pi
-OS et Armbian.
+d'autre que la libc et lz4 — le décodage H.264 matériel optionnel passe
+par de purs ioctls V4L2 contre les en-têtes UAPI du noyau. Il compile
+tel quel sur Debian, Raspberry Pi OS et Armbian.
 
 ## Build local
 
@@ -108,7 +111,7 @@ cibles d'installation.
 | `sremfb-client` | armhf | SBC ARMv7 (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.0.4 par défaut
+./pkg/build-debs.sh              # version 1.1.0 par défaut
 ./pkg/build-debs.sh 3.1.0        # version explicite
 ```
 
@@ -148,9 +151,9 @@ surchargez-le via la variable d'environnement `MAINT`
 
 ```sh
 # serveur
-sudo apt install ./dist/sremfb-server_1.0.4_amd64.deb
+sudo apt install ./dist/sremfb-server_1.1.0_amd64.deb
 # client (sur le SBC)
-sudo apt install ./dist/sremfb-client_1.0.4_arm64.deb
+sudo apt install ./dist/sremfb-client_1.1.0_arm64.deb
 ```
 
 Sur une conf déjà modifiée, `dpkg -i --force-confold` conserve le fichier

@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.0.4}
+VERSION=${1:-1.1.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -44,7 +44,8 @@ build_client() { # $1 = debian arch, $2 = triplet gcc
     echo "== build client ($1)"
     "$2-gcc" -O2 -Wall -Wextra -I"$TOP" \
         -I"$SYSROOT/$1/usr/include" \
-        -o "$STAGE/sremfb-client-$1" "$TOP/client/sremfb-client.c" \
+        -o "$STAGE/sremfb-client-$1" \
+        "$TOP/client/sremfb-client.c" "$TOP/client/v4l2dec.c" \
         "$SYSROOT/$1/usr/lib/$2/liblz4.a"
     "$2-strip" "$STAGE/sremfb-client-$1"
 }
@@ -124,13 +125,15 @@ fi
 EOF
 chmod 755 "$ROOT/DEBIAN/postrm"
 make_deb sremfb-server amd64 \
-"Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms
+"Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms, libx264-164
 Conflicts: rfb-server
 Replaces: rfb-server
 Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
  Expose un connecteur d'écran virtuel EVDI par client connecté (identifié
  par son adresse MAC) et transfère les zones modifiées, compressées en
- LZ4, vers les sremfb-client du LAN (allowlist CIDR)."
+ LZ4, vers les sremfb-client du LAN (allowlist CIDR). Mesure la
+ congestion par le délai et bascule en H.264 (x264) les clients qui
+ savent le décoder quand le lien sature."
 
 # ---- sremfb-client (arm64 + armhf) ----
 for arch in arm64 armhf; do
@@ -165,7 +168,9 @@ Conflicts: rfb-client
 Replaces: rfb-client
 Description: sRemFB, écran virtuel réseau — client framebuffer
  Reçoit les frames d'un sremfb-server et les écrit directement dans
- /dev/fb0 ; éteint la dalle quand le serveur est absent ou blanke.
+ /dev/fb0 ; éteint la dalle quand le serveur est absent ou blanke,
+ reflète le débranchement de la dalle, et décode le H.264 adaptatif
+ en matériel (V4L2 M2M, ex. Pi 3) quand le SBC en dispose.
  LZ4 lié en statique : aucune autre dépendance."
 done
 

@@ -68,16 +68,50 @@ void sremfb_schedule_client_lost(SremfbClient *c)
         c->lost_id = g_idle_add(client_lost_idle, c);
 }
 
+/* Upstream traffic: PONG echoes from feedback-capable clients (parsed and
+ * fed to the pressure controller), anything else skipped byte-wise until
+ * a magic lines back up (the same resync guard as the frame stream). */
+static void client_parse_upstream(SremfbClient *c)
+{
+    for (;;) {
+        /* hunt for the magic at the buffer start */
+        while (c->recvlen >= 4 &&
+               memcmp(c->recvbuf, &(uint32_t){SREMFB_MAGIC}, 4) != 0) {
+            memmove(c->recvbuf, c->recvbuf + 1, --c->recvlen);
+            if (++c->recv_garbage > 256) {
+                g_message("[%s] upstream garbage, dropping", c->macstr);
+                sremfb_schedule_client_lost(c);
+                return;
+            }
+        }
+        if (c->recvlen < sizeof(struct sremfb_client_msg))
+            return;
+
+        struct sremfb_client_msg msg;
+        memcpy(&msg, c->recvbuf, sizeof(msg));
+        c->recvlen -= sizeof(msg);
+        memmove(c->recvbuf, c->recvbuf + sizeof(msg), c->recvlen);
+        c->recv_garbage = 0;
+
+        if (msg.type == SREMFB_CMSG_PONG && c->feedback)
+            sremfb_ctl_on_pong(c, msg.t_echo_us);
+        /* unknown types: ignore (forward compat) */
+    }
+}
+
 static gboolean on_client_io(gint fd, GIOCondition cond, gpointer data)
 {
     SremfbClient *c = data;
-    uint8_t scratch[256];
     ssize_t n;
 
     if (cond & G_IO_IN) {
-        n = read(fd, scratch, sizeof(scratch));
-        if (n > 0)
-            return G_SOURCE_CONTINUE;   /* clients send nothing; ignore */
+        n = read(fd, c->recvbuf + c->recvlen,
+                 sizeof(c->recvbuf) - c->recvlen);
+        if (n > 0) {
+            c->recvlen += (size_t)n;
+            client_parse_upstream(c);
+            return G_SOURCE_CONTINUE;
+        }
         if (n < 0 && (errno == EINTR || errno == EAGAIN))
             return G_SOURCE_CONTINUE;
     }
@@ -124,7 +158,7 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
 
     if (!hello_valid(&hello)) {
         g_message("invalid client hello from %s, dropping", peer);
-        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_BAD_HELLO);
+        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_BAD_HELLO, 0);
         close(cfd);
         return G_SOURCE_CONTINUE;
     }
@@ -144,7 +178,7 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     if (srv->clients->len >= SREMFB_MAX_CLIENTS) {
         g_message("refusing %s: %u clients already connected", peer,
                   srv->clients->len);
-        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_NO_DEVICE);
+        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_NO_DEVICE, 0);
         close(cfd);
         return G_SOURCE_CONTINUE;
     }
@@ -154,23 +188,26 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     c->fd = cfd;
     c->hello = hello;
     c->lz4 = (hello.flags & SREMFB_HELLO_FLAG_LZ4) != 0;
+    c->feedback = (hello.flags & SREMFB_HELLO_FLAG_FEEDBACK) != 0;
+    c->h264_cap = (hello.flags & SREMFB_HELLO_FLAG_H264) != 0;
     g_strlcpy(c->peer, peer, sizeof(c->peer));
     g_snprintf(c->macstr, sizeof(c->macstr),
                "%02x:%02x:%02x:%02x:%02x:%02x",
                hello.mac[0], hello.mac[1], hello.mac[2],
                hello.mac[3], hello.mac[4], hello.mac[5]);
 
-    g_message("[%s] client %s: fb %ux%u %ubpp pixfmt %u lz4=%c "
-              "model \"%.13s\"",
+    g_message("[%s] client %s: fb %ux%u %ubpp pixfmt %u lz4=%c ping=%c "
+              "h264=%c model \"%.13s\"",
               c->macstr, peer, hello.xres, hello.yres, hello.bpp,
-              hello.pixfmt, c->lz4 ? 'y' : 'n',
+              hello.pixfmt, c->lz4 ? 'y' : 'n', c->feedback ? 'y' : 'n',
+              c->h264_cap ? 'y' : 'n',
               hello.model[0] ? hello.model : "(none)");
 
     if (!sremfb_evdi_acquire(c)) {
         g_message("[%s] no free evdi device — raise initial_device_count "
                   "in /etc/modprobe.d/sremfb.conf (or "
                   "echo 1 > /sys/devices/evdi/add)", c->macstr);
-        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_NO_DEVICE);
+        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_NO_DEVICE, 0);
         close(cfd);
         g_free(c);
         return G_SOURCE_CONTINUE;

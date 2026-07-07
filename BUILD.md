@@ -15,12 +15,14 @@ Two C binaries, no exotic build system — just plain `Makefile`s.
 ### Server (PC)
 
 ```sh
-sudo apt install build-essential libglib2.0-dev liblz4-dev \
+sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
                  evdi-dkms libevdi-dev
 ```
 
 - `glib-2.0` — event loop, sources, utilities.
 - `liblz4` — rectangle compression.
+- `libx264` — H.264 encoding for the adaptive-compression path (engaged
+  per client, under measured congestion).
 - `libevdi` + `evdi-dkms` — the EVDI kernel module (the DisplayLink
   driver) and its library. `evdi-dkms` builds the module for the running
   kernel, so a working `dkms` and the kernel headers are required.
@@ -37,7 +39,9 @@ sudo apt install build-essential liblz4-dev
 ```
 
 The client is deliberately pure C: no GLib, no DRM, nothing but libc and
-lz4. It compiles as-is on Debian, Raspberry Pi OS and Armbian.
+lz4 — the optional hardware H.264 decoding is plain V4L2 ioctls against
+the kernel UAPI headers. It compiles as-is on Debian, Raspberry Pi OS
+and Armbian.
 
 ## Local build
 
@@ -105,7 +109,7 @@ targets.
 | `sremfb-client` | armhf | ARMv7 SBC (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.0.4 by default
+./pkg/build-debs.sh              # version 1.1.0 by default
 ./pkg/build-debs.sh 3.1.0        # explicit version
 ```
 
@@ -144,9 +148,9 @@ override it with the `MAINT` environment variable
 
 ```sh
 # server
-sudo apt install ./dist/sremfb-server_1.0.4_amd64.deb
+sudo apt install ./dist/sremfb-server_1.1.0_amd64.deb
 # client (on the SBC)
-sudo apt install ./dist/sremfb-client_1.0.4_arm64.deb
+sudo apt install ./dist/sremfb-client_1.1.0_arm64.deb
 ```
 
 On an already-modified config, `dpkg -i --force-confold` keeps the

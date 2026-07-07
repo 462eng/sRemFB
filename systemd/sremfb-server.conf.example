@@ -3,3 +3,7 @@
 # Unset or empty = accept every address (dedicated/trusted LAN only!).
 SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
 # SREMFB_PORT=4629
+# Adaptive H.264 (only for clients advertising a decoder) — A/B switches:
+# never encode / always encode when the client can:
+# SREMFB_NO_H264=1
+# SREMFB_FORCE_H264=1

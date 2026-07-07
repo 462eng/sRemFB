@@ -10,3 +10,8 @@ SREMFB_SERVER=192.0.2.1
 # SREMFB_WRITE_MODE=pwrite
 # Override the MAC announced to the server (monitor identity):
 # SREMFB_MAC=aa:bb:cc:dd:ee:ff
+# Don't advertise hardware H.264 decoding (adaptive compression stays off):
+# SREMFB_NO_H264=1
+# Don't watch the panel's DRM connector (unplugging the panel then no
+# longer unplugs the virtual monitor on the server):
+# SREMFB_NO_HOTPLUG=1

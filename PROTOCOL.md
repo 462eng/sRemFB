@@ -4,15 +4,22 @@
 
 sRemFB's application protocol, shared verbatim by server and client in
 [`protocol.h`](protocol.h). Version described here: **v2**
-(`SREMFB_PROTO_VER = 2`).
+(`SREMFB_PROTO_VER = 2`), including its **feature bits** (delay feedback
+and adaptive H.264, negotiated through the hellos without a version
+bump — every old/new combination stays compatible).
 
 ## Transport
 
 - **TCP**, a single port (default **4629**), with several simultaneous
   clients told apart by their MAC address (see [README.md](README.md)).
-- `TCP_NODELAY`, `SO_KEEPALIVE` (idle 10 s / intvl 5 s / cnt 3 — detects
-  an unplugged SBC even without traffic), `SO_SNDTIMEO` 20 s,
-  `SO_RCVTIMEO` 5 s. `SIGPIPE` ignored.
+- `TCP_NODELAY`, `SO_KEEPALIVE` (idle 10 s / intvl 5 s / cnt 3),
+  `TCP_USER_TIMEOUT` 6 s (unACKed data ⇒ the connection dies even
+  mid-send), `SO_SNDTIMEO` 20 s, `SO_RCVTIMEO` 5 s. `SIGPIPE` ignored.
+- **Liveness** (when the PING feature is negotiated): the server keeps a
+  heartbeat PING flowing at least every ~2 s even on a static screen,
+  and each side declares the other dead after ~6 s of silence — the
+  virtual monitor unplugs and the panel drops to "no signal" in ~6-7 s
+  on a network cut. Older peers fall back to the TCP timers (~20-25 s).
 - The server checks the address against the CIDR allowlist
   (`SREMFB_ALLOW`) **at accept time**, before it even reads the hello.
 - **No encryption, no authentication.** For a dedicated, trusted LAN only.
@@ -46,6 +53,11 @@ server → client   :  sremfb_server_hello   (16 B, once)
                        status != 0  ⇒  the server closes the connection
 server → client   :  sremfb_frame_hdr + payload   (repeated, on damage)
                      sremfb_frame_hdr BLANK / UNBLANK   (no payload)
+                     sremfb_frame_hdr PING + u64       (if negotiated)
+client → server   :  sremfb_client_msg PONG (16 B, echoes each PING)
+server → client   :  sremfb_frame_hdr H264 + access unit   (under
+                     measured congestion, if negotiated; H264_EOS ends
+                     the episode)
 ```
 
 ## Messages
@@ -58,7 +70,7 @@ Sent exactly once, right after the connection.
 |---|---|---|
 | `magic` | `u32` | `SREMFB_MAGIC` |
 | `proto_ver` | `u16` | `SREMFB_PROTO_VER` (2) |
-| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = the client accepts LZ4 |
+| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = the client accepts LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = the client echoes PING as PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = the client decodes H.264 (4:2:0, Annex B) at its resolution |
 | `xres`, `yres` | `u16` | visible framebuffer resolution |
 | `bpp` | `u8` | framebuffer bits per pixel: 16 or 32 |
 | `pixfmt` | `u8` | `enum sremfb_pixfmt` |
@@ -80,7 +92,8 @@ Sent once, after the compositor has set a mode on the connector.
 | `status` | `u16` | `enum sremfb_status`; nonzero ⇒ the client closes |
 | `width`, `height` | `u16` | negotiated stream size (normally `xres`,`yres`) |
 | `pixfmt` | `u8` | pixel format of the frames that follow |
-| `reserved[3]` | `u8` | reserved |
+| `flags` | `u8` | bit 0 `SREMFB_SRV_FLAG_PING` = PINGs may appear · bit 1 `SREMFB_SRV_FLAG_H264` = the stream may switch to H.264. The server only sets a bit the client advertised; older servers always send 0 here |
+| `reserved[2]` | `u8` | reserved |
 
 Status codes (`enum sremfb_status`):
 
@@ -100,9 +113,9 @@ control messages carry no payload and a 0×0 rect.
 |---|---|---|
 | `magic` | `u32` | `SREMFB_MAGIC` (resync / corruption guard) |
 | `encoding` | `u8` | `enum sremfb_encoding` |
-| `reserved[3]` | `u8` | reserved |
+| `reserved[3]` | `u8` | H264: `reserved[0]` bit 0 = `SREMFB_H264_FLAG_IDR` (informational); otherwise reserved |
 | `x`, `y`, `w`, `h` | `u16` | destination rect, in stream coordinates |
-| `payload_len` | `u32` | RAW: `w*h*bytespp`; LZ4: block size; BLANK/UNBLANK: 0 |
+| `payload_len` | `u32` | RAW: `w*h*bytespp`; LZ4: block size; BLANK/UNBLANK/H264_EOS: 0; PING: 8; H264: access-unit size |
 
 Encodings (`enum sremfb_encoding`):
 
@@ -112,6 +125,30 @@ Encodings (`enum sremfb_encoding`):
 | 1 | `LZ4` | one LZ4 block of those raw pixels |
 | 2 | `BLANK` | none: turn the panel off (DPMS off) |
 | 3 | `UNBLANK` | none: turn the panel back on |
+| 4 | `PING` | 8 B: `u64` server monotonic clock (µs), echo it back verbatim in a PONG. 0×0 rect |
+| 5 | `H264` | one H.264 Annex B access unit (4:2:0, no B-frames, decode order = display order); the rect is always the full stream |
+| 6 | `H264_EOS` | none: the H.264 episode is over — drain the decoder, display everything, then resume reading |
+
+### `sremfb_client_msg` — 16 bytes, client → server
+
+The only upstream message beyond the hello. Sent only when the server
+hello advertised `SREMFB_SRV_FLAG_PING` (older servers read and discard
+upstream bytes, so a confused client does no harm).
+
+| Field | Type | Purpose |
+|---|---|---|
+| `magic` | `u32` | `SREMFB_MAGIC` |
+| `type` | `u8` | 1 = `SREMFB_CMSG_PONG` |
+| `reserved[3]` | `u8` | reserved |
+| `t_echo_us` | `u64` | the PING payload, verbatim |
+
+The client emits the PONG **at its position in the receive stream**,
+after applying every frame that preceded the PING. TCP being ordered,
+the server-side `now − t_echo_us` therefore measures the end-to-end
+delay of everything queued ahead — kernel send buffer, network queues
+and client processing. That delay is the congestion signal driving the
+adaptive encoder (see below); only the server's clock is involved, no
+synchronization needed.
 
 ## Pixels
 
@@ -130,13 +167,44 @@ The effective frame format is the one announced in
 
 The server only emits a `frame_hdr` on damage: the EVDI kernel module
 merges the changed areas into at most 16 rectangles and only those
-rectangles are sent. Static screen = zero traffic. Each rectangle is
-compressed with LZ4 (falls back to RAW if the client didn't set the flag,
-or if LZ4 doesn't help).
+rectangles are sent. Static screen = zero pixel traffic (just the
+28-byte liveness heartbeat every ~2 s when negotiated). Each rectangle
+is compressed with LZ4 (falls back to RAW if the client didn't set the
+flag, or if LZ4 doesn't help).
+
+## Adaptive H.264
+
+When both sides advertised it, the server switches the stream to H.264
+under **measured** congestion (echo delay too high, or delivered rate
+below ~15 fps while damage keeps coming) and back once it subsides —
+nothing is configured, the link capacity is learned from what actually
+drains while the delay says the link is saturated. The stream stays
+damage-driven in H.264 mode: one full-frame access unit per damage
+event (unchanged areas cost nothing thanks to skip blocks), static
+screen = still zero traffic.
+
+Ordering rules that make the switches seamless:
+
+- **RAW → H264**: the first access unit is an IDR (with SPS/PPS), so it
+  repaints the full frame; no gap.
+- **H264 → RAW**: the server sends `H264_EOS`, then a **full-frame
+  RAW/LZ4 repaint**, then normal rects. The client must finish draining
+  and displaying its decoder output *before* reading on, so the repaint
+  always lands last and the screen ends pixel-exact.
+- A new episode always restarts with an IDR.
+- `PING` may appear anywhere in the stream, in either mode.
+
+The encoded stream is 4:2:0 (High profile at most), BT.601 limited
+range, without B-frames — decodable in order by the V4L2 stateful
+hardware decoders of common SBCs (e.g. Raspberry Pi ≤ 3).
 
 ## Version compatibility
 
 The v1 magic is kept, but `proto_ver` is checked when the hello is
 received: a v1 client (24 B) is rejected by a v2 server with `BAD_HELLO`.
 The `reserved[]` fields allow the structs to be extended without changing
-their size, as long as they stay zero on the older peer's side.
+their size, as long as they stay zero on the older peer's side — that is
+exactly how the v2 feature bits were added: an old client leaves bits
+1-2 clear (server never pings nor encodes), an old server sends a zero
+`flags` byte (client never writes upstream), and every combination keeps
+the plain v2 behavior.

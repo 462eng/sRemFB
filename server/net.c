@@ -211,6 +211,10 @@ int net_accept_and_hello(SremfbServer *srv, int listen_fd,
 
     int one = 1;
     int idle = 10, intvl = 5, cnt = 3;
+    int user_to = 6000;        /* ms: unACKed data for 6 s = link dead —
+                                  kills the connection even while a big
+                                  blocking send is in flight, so the
+                                  virtual monitor unplugs fast */
     struct timeval snd_to = { .tv_sec = 20 };
     struct timeval rcv_to = { .tv_sec = 5 };
 
@@ -219,6 +223,7 @@ int net_accept_and_hello(SremfbServer *srv, int listen_fd,
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
     setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_to, sizeof(user_to));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_to, sizeof(snd_to));
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &rcv_to, sizeof(rcv_to));
 
@@ -231,7 +236,8 @@ int net_accept_and_hello(SremfbServer *srv, int listen_fd,
 }
 
 gboolean net_send_server_hello(int fd, uint16_t width, uint16_t height,
-                               uint8_t pixfmt, uint16_t status)
+                               uint8_t pixfmt, uint16_t status,
+                               uint8_t flags)
 {
     struct sremfb_server_hello sh = {0};
 
@@ -241,5 +247,6 @@ gboolean net_send_server_hello(int fd, uint16_t width, uint16_t height,
     sh.width = width;
     sh.height = height;
     sh.pixfmt = pixfmt;
+    sh.flags = flags;
     return net_send_all(fd, &sh, sizeof(sh));
 }

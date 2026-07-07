@@ -51,6 +51,24 @@ GNOME blanks its outputs (DPMS pass-through).
   most 16 rectangles and only those rectangles are sent → a static screen
   means zero traffic. Each rectangle is compressed with **LZ4** (raw
   fallback).
+- **Measured congestion control**: the server periodically slips a PING
+  into the stream and the client echoes it back — the echo delay is the
+  end-to-end congestion of everything queued ahead. When that delay says
+  the raw path can't hold ~15 fps (e.g. a very dynamic screen behind a
+  Pi 3's 100 Mbit port), the server transparently switches that client
+  to **H.264** (x264, zerolatency, bitrate driven by the same delay
+  signal) and back once the pressure subsides. Per-client and fully
+  negotiated: the client advertises the capability only if it has a
+  V4L2 stateful hardware decoder (Raspberry Pi ≤ 3: `/dev/video10`);
+  everything else keeps the plain RAW/LZ4 path. No limits to configure —
+  the link capacity is learned by measurement. The same PINGs double as
+  a liveness heartbeat: a network cut unplugs the virtual monitor and
+  drops the panel to "no signal" in ~6 s (~20-25 s TCP fallback with an
+  older peer).
+- **Panel hotplug pass-through**: if the SBC's panel is unplugged, the
+  client disconnects and the virtual monitor vanishes from the desktop —
+  exactly like pulling the cable of a real screen. Replugging it brings
+  the monitor back (watched via the DRM connector status, ~2 s).
 - Client-side formats: 32bpp XRGB8888 (passthrough) and 16bpp RGB565
   (server-side conversion with ordered dithering; `SREMFB_NO_DITHER=1` to
   turn it off).
@@ -67,7 +85,7 @@ Full details and Debian packages: **[BUILD.md](BUILD.md)**.
 PC (server):
 
 ```sh
-sudo apt install build-essential libglib2.0-dev liblz4-dev evdi-dkms libevdi-dev
+sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev evdi-dkms libevdi-dev
 make
 sudo make install-server
 sudo modprobe evdi          # first time only (loaded at boot afterwards)
@@ -108,6 +126,10 @@ screen "unplugs".
 | `SREMFB_MODEL` (client) | auto | override the announced model name (13 chars max) |
 | `SREMFB_NO_LZ4` (client) | — | force raw (compression A/B test) |
 | `SREMFB_NO_DITHER` (server) | — | disable RGB565 dithering (A/B test) |
+| `SREMFB_NO_H264` (client) | — | don't advertise the hardware H.264 decoder |
+| `SREMFB_NO_H264` (server) | — | never switch to H.264 (delay still measured/logged) |
+| `SREMFB_FORCE_H264` (server) | — | pin H.264 on capable clients (A/B test) |
+| `SREMFB_NO_HOTPLUG` (client) | — | don't watch the panel's DRM connector |
 
 The client runs as root by default (`/dev/fb0` access + console ioctls).
 The server runs as the session user: access to `/dev/dri/cardN` (the EVDI
@@ -163,7 +185,9 @@ position).
 - Known limitation: sends are blocking, so a congested or dead client can
   delay the others up to `SO_SNDTIMEO` (20 s) — head-of-line blocking. A
   possible fix (not implemented): non-blocking sockets + a "latest frame"
-  buffer per client.
+  buffer per client. The adaptive H.264 mode shrinks the sends by an
+  order of magnitude on the clients that need it, which mitigates this
+  in practice.
 
 ## License
 

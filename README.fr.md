@@ -50,6 +50,24 @@ et quand GNOME blanke ses écrans (DPMS transmis).
 - Transfert piloté par le damage : le noyau fusionne les zones modifiées
   en 16 rectangles max et seuls ces rectangles partent → écran statique =
   zéro trafic. Chaque rectangle est compressé en **LZ4** (repli raw).
+- **Contrôle de congestion mesuré** : le serveur glisse périodiquement un
+  PING dans le flux, le client le renvoie — le délai d'écho mesure la
+  congestion de bout en bout de tout ce qui était en file devant. Quand
+  ce délai dit que le chemin brut ne tient plus ~15 fps (ex. un écran
+  très dynamique derrière le port 100 Mbit d'un Pi 3), le serveur bascule
+  ce client en **H.264** de façon transparente (x264, zerolatency,
+  bitrate piloté par le même signal de délai), et revient quand la
+  pression retombe. Par client et entièrement négocié : le client
+  n'annonce la capacité que s'il a un décodeur matériel V4L2 stateful
+  (Raspberry Pi ≤ 3 : `/dev/video10`) ; tout le reste garde le chemin
+  RAW/LZ4. Aucune limite à configurer — la capacité du lien s'apprend
+  par la mesure. Les mêmes PING servent de battement de cœur : une
+  coupure réseau débranche l'écran virtuel et passe la dalle en « no
+  signal » en ~6 s (repli TCP ~20-25 s avec un ancien pair).
+- **Hotplug de la dalle répercuté** : si la dalle du SBC est débranchée,
+  le client se déconnecte et l'écran virtuel disparaît du bureau —
+  exactement comme un câble tiré sur un vrai moniteur. La rebrancher
+  fait revenir l'écran (surveillance du statut du connecteur DRM, ~2 s).
 - Formats côté client : 32bpp XRGB8888 (passthrough) et 16bpp RGB565
   (conversion serveur avec dithering ordonné ; `SREMFB_NO_DITHER=1` pour
   couper).
@@ -65,7 +83,7 @@ Détails complets et paquets Debian : **[BUILD.fr.md](BUILD.fr.md)**.
 PC (serveur) :
 
 ```sh
-sudo apt install build-essential libglib2.0-dev liblz4-dev evdi-dkms libevdi-dev
+sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev evdi-dkms libevdi-dev
 make
 sudo make install-server
 sudo modprobe evdi          # première fois seulement (auto au boot ensuite)
@@ -106,6 +124,10 @@ l'écran « se débranche ».
 | `SREMFB_MODEL` (client) | auto | forcer le nom de modèle annoncé (13 car. max) |
 | `SREMFB_NO_LZ4` (client) | — | forcer le raw (A/B test compression) |
 | `SREMFB_NO_DITHER` (serveur) | — | couper le dithering RGB565 (A/B test) |
+| `SREMFB_NO_H264` (client) | — | ne pas annoncer le décodeur H.264 matériel |
+| `SREMFB_NO_H264` (serveur) | — | ne jamais basculer en H.264 (le délai reste mesuré/loggé) |
+| `SREMFB_FORCE_H264` (serveur) | — | épingler le H.264 sur les clients capables (A/B test) |
+| `SREMFB_NO_HOTPLUG` (client) | — | ne pas surveiller le connecteur DRM de la dalle |
 
 Le client tourne en root par défaut (accès `/dev/fb0` + ioctl console).
 Le serveur tourne en user de session : l'accès à `/dev/dri/cardN`
@@ -161,7 +183,9 @@ indépendante).
 - Limite connue : les envois sont bloquants, donc un client congestionné
   ou mort peut retarder les autres jusqu'au `SO_SNDTIMEO` (20 s) —
   *head-of-line blocking*. Correctif possible (non implémenté) : sockets
-  non bloquantes + buffer « dernière frame » par client.
+  non bloquantes + buffer « dernière frame » par client. Le H.264
+  adaptatif réduit d'un ordre de grandeur les envois des clients qui en
+  ont besoin, ce qui atténue le problème en pratique.
 
 ## Licence
 

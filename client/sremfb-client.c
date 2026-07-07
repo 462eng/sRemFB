@@ -22,11 +22,35 @@
  *   SREMFB_MODEL       override the announced panel model (13 chars max;
  *                      default: "vendor model" from the attached panel's
  *                      EDID via /sys/class/drm)
+ *   SREMFB_NO_H264     don't advertise H.264 decoding even if a V4L2
+ *                      hardware decoder is present
+ *   SREMFB_NO_HOTPLUG  don't watch the panel's DRM connector (see below)
+ *
+ * The client always advertises FEEDBACK (it echoes the server's PING
+ * messages, giving the server its congestion-delay signal) and, when a
+ * V4L2 stateful M2M H.264 decoder is found (Raspberry Pi: /dev/video10),
+ * the H264 capability — the server then switches the stream to H.264
+ * under measured congestion. Any decoder failure disables the capability
+ * and reconnects on the plain RAW/LZ4 path.
+ *
+ * Panel hotplug: if a connected DRM connector exists at startup, the
+ * client watches it (~2 s). Unplugging the panel closes the connection —
+ * the server unplugs the virtual monitor, exactly like pulling the cable
+ * of a real screen — and replugging reconnects (a different panel means a
+ * different EDID model, hence a new monitor identity).
  *
  * Test mode (runs anywhere, no framebuffer needed):
  *   sremfb-client --test WxH [server] [port]
  *   Announces WxH @ 32bpp XRGB8888 and dumps every 30th frame to
  *   sremfb-test-NNNN.ppm instead of writing to a framebuffer.
+ *   With SREMFB_TEST_H264_SINK=1 it also advertises H264 without
+ *   decoding: access units are appended to sremfb-test.h264 (pure
+ *   Annex B, playable with ffplay) + sremfb-test.h264.len (u32 LE
+ *   sizes, one per AU — the input of --decode-test).
+ *
+ * Decoder bring-up (hidden): sremfb-client --decode-test FILE.h264
+ *   Replays a sink capture through the V4L2 decoder straight to the
+ *   framebuffer, no network involved.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -37,6 +61,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -49,13 +74,15 @@
 #include <unistd.h>
 #include <linux/fb.h>
 #include <linux/kd.h>
+#include <linux/videodev2.h>
 #include <linux/vt.h>
 
 #include <lz4.h>
 
 #include "protocol.h"
+#include "v4l2dec.h"
 
-static volatile sig_atomic_t g_stop = 0;
+volatile sig_atomic_t g_stop = 0;      /* shared with v4l2dec.c */
 
 static struct {
     const char *server;
@@ -64,9 +91,21 @@ static struct {
     const char *tty;
     int use_pwrite;
     int no_lz4;
+    int no_h264;
 
     int test_mode;
     unsigned test_w, test_h;
+    int test_sink;             /* --test + SREMFB_TEST_H264_SINK */
+
+    /* adaptive H.264 */
+    int dec_found;             /* v4l2dec_probe() succeeded */
+    int dec_open;              /* decoder initialized this session */
+    int h264_broken;           /* runtime failure: stop advertising */
+    uint8_t srv_flags;         /* from the server hello */
+    uint8_t *rowbuf;           /* one converted row (YUV -> fb format) */
+
+    /* panel hotplug watcher */
+    int hotplug_armed;         /* a connected DRM connector existed at start */
 
     /* framebuffer state */
     int fb_fd;
@@ -403,6 +442,106 @@ static void discover_mac(int sock, uint8_t mac[6])
     close(s);
 }
 
+/* ------------------------------------------------------ panel watch */
+
+/* Is any DRM connector "connected"? 1 = yes, 0 = no (panel unplugged),
+ * -1 = no DRM at all (watcher stays disabled). "unknown" statuses are
+ * ignored — only an explicit "disconnected" everywhere counts as gone. */
+static int panel_present(void)
+{
+    DIR *dir = opendir("/sys/class/drm");
+    struct dirent *de;
+    int have_conn = 0, connected = 0;
+
+    if (!dir)
+        return -1;
+    while ((de = readdir(dir))) {
+        char path[512], status[16] = "";
+        if (strncmp(de->d_name, "card", 4) != 0 || !strchr(de->d_name, '-'))
+            continue;
+        snprintf(path, sizeof(path), "/sys/class/drm/%s/status", de->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f)
+            continue;
+        if (!fgets(status, sizeof(status), f))
+            status[0] = '\0';
+        fclose(f);
+        have_conn = 1;
+        if (strncmp(status, "connected", 9) == 0 ||
+            strncmp(status, "unknown", 7) == 0)
+            connected = 1;
+    }
+    closedir(dir);
+    if (!have_conn)
+        return -1;
+    return connected;
+}
+
+/* ---------------------------------------------------- decoded frames */
+
+static inline uint8_t clamp255u(int v)
+{
+    return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+}
+
+/* BT.601 limited range, matching the server's encoder VUI. */
+static void yuv_row_to_fb(uint8_t *dst, const uint8_t *yrow,
+                          const uint8_t *urow, const uint8_t *vrow,
+                          unsigned uv_step, unsigned w)
+{
+    for (unsigned i = 0; i < w; i++) {
+        int c = 298 * ((int)yrow[i] - 16);
+        int du = (int)urow[(i / 2) * uv_step] - 128;
+        int dv = (int)vrow[(i / 2) * uv_step] - 128;
+        int r = clamp255u((c + 409 * dv + 128) >> 8);
+        int g = clamp255u((c - 100 * du - 208 * dv + 128) >> 8);
+        int b = clamp255u((c + 516 * du + 128) >> 8);
+        if (C.bytespp == 2) {
+            ((uint16_t *)dst)[i] =
+                (uint16_t)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+        } else {
+            ((uint32_t *)dst)[i] =
+                ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+        }
+    }
+}
+
+/* Callback from v4l2dec.c: one decoded frame -> framebuffer. */
+void v4l2dec_emit(const struct v4l2dec_frame *f)
+{
+    unsigned w = f->w < C.stream_w ? f->w : C.stream_w;
+    unsigned h = f->h < C.stream_h ? f->h : C.stream_h;
+
+    if (f->fourcc == V4L2_PIX_FMT_RGB565 && C.bytespp == 2) {
+        for (unsigned y = 0; y < h; y++)
+            fb_blit_row(0, y, w, f->data + (size_t)y * f->stride);
+    } else if (C.rowbuf) {
+        const uint8_t *luma = f->data;
+        const uint8_t *chroma = f->data + (size_t)f->stride * f->coded_h;
+        for (unsigned y = 0; y < h; y++) {
+            const uint8_t *u, *v;
+            unsigned step;
+            if (f->fourcc == V4L2_PIX_FMT_NV12) {
+                const uint8_t *uv = chroma + (size_t)(y / 2) * f->stride;
+                u = uv;
+                v = uv + 1;
+                step = 2;
+            } else {                       /* 'YU12' planar YUV420 */
+                unsigned cs = f->stride / 2;
+                u = chroma + (size_t)(y / 2) * cs;
+                v = chroma + (size_t)(f->coded_h / 2) * cs +
+                    (size_t)(y / 2) * cs;
+                step = 1;
+            }
+            yuv_row_to_fb(C.rowbuf, luma + (size_t)y * f->stride, u, v,
+                          step, w);
+            fb_blit_row(0, y, w, C.rowbuf);
+        }
+    }
+    if (C.blanked)
+        fb_set_blank(0);
+}
+
 /* ------------------------------------------------------- panel edid */
 
 /* Copies up to 13 printable chars into model[13] (not NUL-terminated
@@ -538,9 +677,19 @@ static int tcp_connect(const char *host, const char *port)
     }
     freeaddrinfo(res);
     if (fd >= 0) {
-        int one = 1;
+        int one = 1, idle = 10, intvl = 5, cnt = 3, user_to = 6000;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof(one));
+        /* tuned like the server (~25 s): without these the kernel
+         * defaults are 2 hours — a dead server with a static screen
+         * would leave the stale image on the panel that long instead
+         * of dropping to "no signal" */
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+        setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+        /* and our writes (hello, pongs) must not linger unACKed either */
+        setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_to,
+                   sizeof(user_to));
     }
     return fd;
 }
@@ -553,7 +702,11 @@ static int hello_exchange(int fd)
     ch.magic = SREMFB_MAGIC;
     ch.proto_ver = SREMFB_PROTO_VER;
     if (!C.no_lz4)
-        ch.flags = SREMFB_HELLO_FLAG_LZ4;
+        ch.flags |= SREMFB_HELLO_FLAG_LZ4;
+    ch.flags |= SREMFB_HELLO_FLAG_FEEDBACK;
+    if ((C.dec_found && !C.no_h264 && !C.h264_broken && !C.test_mode) ||
+        C.test_sink)
+        ch.flags |= SREMFB_HELLO_FLAG_H264;
     discover_mac(fd, ch.mac);
     discover_model(ch.model);
     if (C.test_mode) {
@@ -603,6 +756,11 @@ static int hello_exchange(int fd)
 
     C.stream_w = sh.width;
     C.stream_h = sh.height;
+    C.srv_flags = sh.flags;
+    if (C.srv_flags & SREMFB_SRV_FLAG_H264) {
+        free(C.rowbuf);
+        C.rowbuf = malloc((size_t)C.stream_w * (C.bytespp ? C.bytespp : 4));
+    }
     if (C.test_mode) {
         C.off_x = C.off_y = 0;
         free(C.testbuf);
@@ -634,6 +792,46 @@ static void emit_row(unsigned sx, unsigned sy, unsigned w, const uint8_t *row)
     }
 }
 
+#define AU_CAP (1u << 20)              /* matches the decoder buffers */
+
+/* One H.264 access unit: sink it (test), or decode it. Returns -1 to
+ * drop the connection (h264_broken set for decoder failures). */
+static int handle_h264_au(const uint8_t *au, size_t len)
+{
+    if (C.test_sink) {
+        static FILE *raw, *lens;
+        if (!raw) {
+            raw = fopen("sremfb-test.h264", "wb");
+            lens = fopen("sremfb-test.h264.len", "wb");
+            logmsg("H.264 sink: writing sremfb-test.h264(.len)");
+        }
+        if (!raw || !lens)
+            return -1;
+        uint32_t l32 = (uint32_t)len;
+        fwrite(au, 1, len, raw);
+        fwrite(&l32, 4, 1, lens);
+        fflush(raw);
+        fflush(lens);
+        return 0;
+    }
+
+    if (!C.dec_open) {
+        if (v4l2dec_open(C.stream_w, C.stream_h,
+                         C.pixfmt == SREMFB_PIX_RGB565) < 0) {
+            logmsg("H.264 decoder init failed — reconnecting without it");
+            C.h264_broken = 1;
+            return -1;
+        }
+        C.dec_open = 1;
+    }
+    if (v4l2dec_feed(au, len) < 0) {
+        logmsg("H.264 decode failed — reconnecting without it");
+        C.h264_broken = 1;
+        return -1;
+    }
+    return 0;
+}
+
 /* Receive frames until error/EOF. Returns only on disconnect/stop. */
 static void frame_loop(int fd)
 {
@@ -642,6 +840,9 @@ static void frame_loop(int fd)
     size_t comp_cap = (size_t)LZ4_compressBound((int)frame_cap);
     uint8_t *framebuf = malloc(frame_cap ? frame_cap : 1);
     uint8_t *compbuf = C.no_lz4 ? NULL : malloc(comp_cap);
+    uint8_t *aubuf = NULL;
+    time_t last_panel_check = time(NULL);
+    time_t last_rx = time(NULL);
 
     if (!framebuf || (!C.no_lz4 && !compbuf)) {
         logmsg("out of memory");
@@ -649,6 +850,47 @@ static void frame_loop(int fd)
     }
 
     while (!g_stop) {
+        /* Wait for socket data, decoder activity, or the panel-check
+         * tick. Message bodies still use blocking reads: they follow
+         * their header immediately. */
+        struct pollfd pfd[2] = {
+            { .fd = fd, .events = POLLIN },
+            { .fd = v4l2dec_fd(), .events = POLLIN | POLLPRI },
+        };
+        int nf = pfd[1].fd >= 0 ? 2 : 1;
+        int pr = poll(pfd, nf, 2000);
+        if (pr < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+
+        if (C.hotplug_armed && time(NULL) - last_panel_check >= 2) {
+            last_panel_check = time(NULL);
+            if (panel_present() == 0) {
+                logmsg("panel disconnected — unplugging from the server");
+                break;
+            }
+        }
+        /* liveness: a server that negotiated PING sends a heartbeat at
+         * least every ~2 s even when the screen is static, so a long
+         * silence means it (or the path) is gone — drop to "no signal"
+         * now instead of waiting for the TCP keepalive. */
+        if ((C.srv_flags & SREMFB_SRV_FLAG_PING) &&
+            time(NULL) - last_rx > 6) {
+            logmsg("server silent for 6 s — dropping to reconnect");
+            break;
+        }
+        if (nf == 2 && pfd[1].revents) {
+            if (v4l2dec_pump() < 0) {
+                logmsg("H.264 decoder failed — reconnecting without it");
+                C.h264_broken = 1;
+                break;
+            }
+        }
+        if (!(pfd[0].revents & (POLLIN | POLLHUP | POLLERR)))
+            continue;
+
         struct sremfb_frame_hdr hdr;
         if (readn(fd, &hdr, sizeof(hdr)) < 0)
             break;
@@ -656,6 +898,7 @@ static void frame_loop(int fd)
             logmsg("bad frame magic 0x%08x, dropping connection", hdr.magic);
             break;
         }
+        last_rx = time(NULL);
 
         if (hdr.encoding == SREMFB_ENC_BLANK ||
             hdr.encoding == SREMFB_ENC_UNBLANK) {
@@ -664,6 +907,54 @@ static void frame_loop(int fd)
                 break;
             }
             fb_set_blank(hdr.encoding == SREMFB_ENC_BLANK);
+            continue;
+        }
+
+        if (hdr.encoding == SREMFB_ENC_PING) {
+            uint64_t t;
+            if (hdr.payload_len != sizeof(t)) {
+                logmsg("bad PING payload len %u", hdr.payload_len);
+                break;
+            }
+            if (readn(fd, &t, sizeof(t)) < 0)
+                break;
+            struct sremfb_client_msg pong = {0};
+            pong.magic = SREMFB_MAGIC;
+            pong.type = SREMFB_CMSG_PONG;
+            pong.t_echo_us = t;
+            if (writen(fd, &pong, sizeof(pong)) < 0)
+                break;
+            continue;
+        }
+
+        if (hdr.encoding == SREMFB_ENC_H264) {
+            if (hdr.payload_len == 0 || hdr.payload_len > AU_CAP) {
+                logmsg("bad H.264 payload len %u", hdr.payload_len);
+                break;
+            }
+            if (!aubuf && !(aubuf = malloc(AU_CAP))) {
+                logmsg("out of memory");
+                break;
+            }
+            if (readn(fd, aubuf, hdr.payload_len) < 0)
+                break;
+            if (handle_h264_au(aubuf, hdr.payload_len) < 0)
+                break;
+            continue;
+        }
+
+        if (hdr.encoding == SREMFB_ENC_H264_EOS) {
+            if (hdr.payload_len != 0) {
+                logmsg("bad H264_EOS payload len %u", hdr.payload_len);
+                break;
+            }
+            if (C.test_sink) {
+                logmsg("H.264 sink: episode over");
+            } else if (C.dec_open && v4l2dec_drain() < 0) {
+                logmsg("H.264 drain failed — reconnecting without it");
+                C.h264_broken = 1;
+                break;
+            }
             continue;
         }
 
@@ -728,6 +1019,72 @@ static void frame_loop(int fd)
 out:
     free(framebuf);
     free(compbuf);
+    free(aubuf);
+    if (C.dec_open) {
+        v4l2dec_close();
+        C.dec_open = 0;
+    }
+}
+
+/* ------------------------------------------------- decoder bring-up */
+
+/* Replays a sink capture (FILE.h264 + FILE.h264.len) through the V4L2
+ * decoder to the framebuffer at ~30 fps. No network. */
+static int decode_test(const char *path)
+{
+    char lenpath[512];
+    snprintf(lenpath, sizeof(lenpath), "%s.len", path);
+    FILE *f = fopen(path, "rb");
+    FILE *fl = fopen(lenpath, "rb");
+    uint8_t *au = malloc(AU_CAP);
+    uint32_t l32;
+    int first = 1, rc = 1;
+    unsigned n = 0;
+
+    if (!f || !fl || !au) {
+        logmsg("cannot open %s / %s", path, lenpath);
+        goto out;
+    }
+    if (!v4l2dec_probe()) {
+        logmsg("no V4L2 H.264 decoder on this machine");
+        goto out;
+    }
+    C.stream_w = C.vinfo.xres;
+    C.stream_h = C.vinfo.yres;
+    C.rowbuf = malloc((size_t)C.stream_w * C.bytespp);
+
+    while (!g_stop && fread(&l32, 4, 1, fl) == 1) {
+        if (l32 == 0 || l32 > AU_CAP) {
+            logmsg("bad AU length %u", l32);
+            goto out;
+        }
+        if (fread(au, 1, l32, f) != l32) {
+            logmsg("truncated %s", path);
+            goto out;
+        }
+        if (first) {
+            if (v4l2dec_open(C.vinfo.xres, C.vinfo.yres,
+                             C.pixfmt == SREMFB_PIX_RGB565) < 0)
+                goto out;
+            first = 0;
+        }
+        if (v4l2dec_feed(au, l32) < 0)
+            goto out;
+        n++;
+        usleep(33000);
+    }
+    if (!first && v4l2dec_drain() < 0)
+        goto out;
+    logmsg("decoded %u access units", n);
+    rc = 0;
+out:
+    v4l2dec_close();
+    if (f)
+        fclose(f);
+    if (fl)
+        fclose(fl);
+    free(au);
+    return rc;
 }
 
 /* ------------------------------------------------------------- main */
@@ -738,7 +1095,8 @@ static void usage(const char *argv0)
             "usage: %s [server] [port]\n"
             "       %s --test WxH [server] [port]\n"
             "env: SREMFB_SERVER SREMFB_PORT SREMFB_FBDEV SREMFB_TTY\n"
-            "     SREMFB_WRITE_MODE SREMFB_MAC SREMFB_MODEL SREMFB_NO_LZ4\n",
+            "     SREMFB_WRITE_MODE SREMFB_MAC SREMFB_MODEL SREMFB_NO_LZ4\n"
+            "     SREMFB_NO_H264 SREMFB_NO_HOTPLUG\n",
             argv0, argv0);
     exit(2);
 }
@@ -756,7 +1114,9 @@ int main(int argc, char **argv)
     env = getenv("SREMFB_WRITE_MODE");
     C.use_pwrite = env && strcmp(env, "pwrite") == 0;
     C.no_lz4 = getenv("SREMFB_NO_LZ4") != NULL;
+    C.no_h264 = getenv("SREMFB_NO_H264") != NULL;
 
+    const char *dectest = NULL;
     int argi = 1;
     if (argi < argc && strcmp(argv[argi], "--test") == 0) {
         argi++;
@@ -766,13 +1126,17 @@ int main(int argc, char **argv)
             C.test_w > 16384 || C.test_h > 16384)
             usage(argv[0]);
         C.test_mode = 1;
+        C.test_sink = getenv("SREMFB_TEST_H264_SINK") != NULL;
         argi++;
+    } else if (argi + 1 < argc && strcmp(argv[argi], "--decode-test") == 0) {
+        dectest = argv[argi + 1];
+        argi += 2;
     }
     if (argi < argc)
         C.server = argv[argi++];
     if (argi < argc)
         C.port = argv[argi++];
-    if (argi < argc || !C.server)
+    if (argi < argc || (!C.server && !dectest))
         usage(argv[0]);
     if (!C.port)
         C.port = "4629";
@@ -783,6 +1147,12 @@ int main(int argc, char **argv)
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
 
+    if (dectest) {
+        if (fb_open() < 0)
+            return 1;
+        return decode_test(dectest) ? 1 : 0;
+    }
+
     if (!C.test_mode) {
         if (fb_open() < 0)
             return 1;
@@ -790,10 +1160,33 @@ int main(int argc, char **argv)
         atexit(console_restore);
         fb_clear();
         fb_set_blank(1);                /* no signal yet */
+
+        if (!C.no_h264)
+            C.dec_found = v4l2dec_probe();
+        C.hotplug_armed = getenv("SREMFB_NO_HOTPLUG") == NULL &&
+                          panel_present() == 1;
+        if (C.hotplug_armed)
+            logmsg("watching the panel connector (SREMFB_NO_HOTPLUG=1 "
+                   "to disable)");
     }
 
     unsigned backoff = 1;
+    int panel_waiting = 0;
     while (!g_stop) {
+        if (C.hotplug_armed && panel_present() == 0) {
+            if (!panel_waiting) {
+                logmsg("panel disconnected — waiting for it to come back");
+                panel_waiting = 1;
+            }
+            sleep(2);
+            continue;
+        }
+        if (panel_waiting) {
+            logmsg("panel reconnected");
+            panel_waiting = 0;
+            backoff = 1;
+        }
+
         int fd = tcp_connect(C.server, C.port);
         if (fd < 0) {
             logmsg("connect to %s:%s failed, retrying in %us",
@@ -833,5 +1226,6 @@ int main(int argc, char **argv)
     if (C.tty_fd >= 0)
         close(C.tty_fd);
     free(C.testbuf);
+    free(C.rowbuf);
     return 0;
 }
