@@ -80,6 +80,8 @@
 
 #include <lz4.h>
 
+#include "usbexport.h"
+
 #include "protocol.h"
 #include "v4l2dec.h"
 
@@ -93,6 +95,7 @@ static struct {
     int use_pwrite;
     int no_lz4;
     int no_h264;
+    int usb_active;            /* usbexport.c bound our USB devices */
 
     int test_mode;
     unsigned test_w, test_h;
@@ -801,6 +804,8 @@ static int hello_exchange(int fd)
     if ((C.dec_found && !C.no_h264 && !C.h264_broken && !C.test_mode) ||
         C.test_sink)
         ch.flags |= SREMFB_HELLO_FLAG_H264;
+    if (C.usb_active)
+        ch.flags |= SREMFB_HELLO_FLAG_USB;
     discover_mac(fd, ch.mac);
     discover_model(ch.model);
     if (C.test_mode) {
@@ -959,12 +964,13 @@ static void frame_loop(int fd)
             break;
         }
 
-        if (C.hotplug_armed && time(NULL) - last_panel_check >= 2) {
+        if (time(NULL) - last_panel_check >= 2) {
             last_panel_check = time(NULL);
-            if (panel_present() == 0) {
+            if (C.hotplug_armed && panel_present() == 0) {
                 logmsg("panel disconnected — unplugging from the server");
                 break;
             }
+            usb_export_tick();      /* bind USB devices plugged meanwhile */
         }
         /* liveness: a server that negotiated PING sends a heartbeat at
          * least every ~2 s even when the screen is static, so a long
@@ -1193,11 +1199,12 @@ out:
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [server] [port]\n"
+            "usage: %s [--usb|--no-usb] [server] [port]\n"
             "       %s --test WxH [server] [port]\n"
             "env: SREMFB_SERVER SREMFB_PORT SREMFB_FBDEV SREMFB_TTY\n"
             "     SREMFB_WRITE_MODE SREMFB_MAC SREMFB_MODEL SREMFB_NO_LZ4\n"
-            "     SREMFB_NO_H264 SREMFB_NO_HOTPLUG\n",
+            "     SREMFB_NO_H264 SREMFB_NO_HOTPLUG\n"
+            "     SREMFB_USB SREMFB_USB_ALLOW SREMFB_USB_DENY\n",
             argv0, argv0);
     exit(2);
 }
@@ -1218,7 +1225,17 @@ int main(int argc, char **argv)
     C.no_h264 = getenv("SREMFB_NO_H264") != NULL;
 
     const char *dectest = NULL;
+    int usb_mode = -1;                  /* -1 auto, 0 off, 1 on */
     int argi = 1;
+    while (argi < argc) {
+        if (strcmp(argv[argi], "--usb") == 0)
+            usb_mode = 1;
+        else if (strcmp(argv[argi], "--no-usb") == 0)
+            usb_mode = 0;
+        else
+            break;
+        argi++;
+    }
     if (argi < argc && strcmp(argv[argi], "--test") == 0) {
         argi++;
         if (argi >= argc ||
@@ -1269,6 +1286,7 @@ int main(int argc, char **argv)
         if (C.hotplug_armed)
             logmsg("watching the panel connector (SREMFB_NO_HOTPLUG=1 "
                    "to disable)");
+        C.usb_active = usb_export_init(usb_mode);
     }
 
     unsigned backoff = 1;
@@ -1315,6 +1333,7 @@ int main(int argc, char **argv)
     }
 
     logmsg("exiting");
+    usb_export_stop();                  /* give the USB devices back */
     if (!C.test_mode) {
         fb_set_blank(0);                /* leave a usable console behind */
         fb_clear();

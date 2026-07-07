@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch sRemFB USB peers (/run/sremfb)
+
+[Path]
+PathModified=/run/sremfb
+MakeDirectory=yes
+DirectoryMode=0775
+
+[Install]
+WantedBy=multi-user.target

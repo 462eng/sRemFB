@@ -7,3 +7,6 @@ SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
 # never encode / always encode when the client can:
 # SREMFB_NO_H264=1
 # SREMFB_FORCE_H264=1
+
+# Ne jamais attacher les périphériques USB des clients (usbip).
+# SREMFB_NO_USB=1

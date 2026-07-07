@@ -71,6 +71,18 @@ et quand GNOME blanke ses écrans (DPMS transmis).
   le client se déconnecte et l'écran virtuel disparaît du bureau —
   exactement comme un câble tiré sur un vrai moniteur. La rebrancher
   fait revenir l'écran (surveillance du statut du connecteur DRM, ~2 s).
+- **Téléport USB** : les périphériques branchés au SBC (clavier, souris,
+  stockage, adaptateurs série) sont « téléportés » vers le PC par
+  **usbip** tant que le client streame — branchés derrière l'écran,
+  utilisés comme des périphériques locaux du PC, détachés dès que le
+  client part. Politique mesurée, pas configurée : HID + stockage +
+  série ; jamais les hubs, ni un device qui porte une interface réseau
+  active (l'Ethernet d'un Pi est de l'USB !), ni un disque monté ;
+  forçage possible par `SREMFB_USB_ALLOW`/`SREMFB_USB_DENY`
+  (`vendor[:product]` hexa). Désactivé par défaut sur Pi 3
+  (`SREMFB_USB=1` ou `--usb` pour forcer). Requiert le paquet `usbip`
+  des deux côtés ; `usbipd` écoute sur le port 3240 du SBC — même
+  modèle de confiance que le reste (LAN dédié).
 - Formats côté client : 32bpp XRGB8888 (passthrough) et 16bpp RGB565
   (conversion serveur avec dithering ordonné ; `SREMFB_NO_DITHER=1` pour
   couper).
@@ -131,6 +143,10 @@ l'écran « se débranche ».
 | `SREMFB_NO_H264` (serveur) | — | ne jamais basculer en H.264 (le délai reste mesuré/loggé) |
 | `SREMFB_FORCE_H264` (serveur) | — | épingler le H.264 sur les clients capables (A/B test) |
 | `SREMFB_NO_HOTPLUG` (client) | — | ne pas surveiller le connecteur DRM de la dalle |
+| `SREMFB_USB` (client) | auto | `1`/`0` : forcer/couper le téléport USB (auto : actif sauf Pi 3) |
+| `SREMFB_USB_ALLOW` (client) | — | ids `vendor[:product]` toujours téléportés (les gardes réseau/disque priment) |
+| `SREMFB_USB_DENY` (client) | — | ids `vendor[:product]` jamais téléportés |
+| `SREMFB_NO_USB` (serveur) | — | ne jamais attacher les périphériques USB des clients |
 
 Le client tourne en root par défaut (accès `/dev/fb0` + ioctl console).
 Le serveur tourne en user de session : l'accès à `/dev/dri/cardN`

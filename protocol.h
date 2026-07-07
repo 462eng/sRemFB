@@ -65,6 +65,12 @@ enum sremfb_encoding {
                                                  SREMFB_ENC_H264 at its
                                                  resolution (implies it also
                                                  handles H264_EOS) */
+#define SREMFB_HELLO_FLAG_USB      (1u << 3)  /* client exports USB devices
+                                                 over usbip (usbipd on TCP
+                                                 3240): the server may attach
+                                                 them while streaming and
+                                                 must detach when the client
+                                                 leaves */
 
 /* server hello flags (the server only sets a bit when the client
  * advertised the matching capability) */

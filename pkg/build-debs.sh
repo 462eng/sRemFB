@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.2.0}
+VERSION=${1:-1.3.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -46,6 +46,7 @@ build_client() { # $1 = debian arch, $2 = triplet gcc
         -I"$SYSROOT/$1/usr/include" \
         -o "$STAGE/sremfb-client-$1" \
         "$TOP/client/sremfb-client.c" "$TOP/client/v4l2dec.c" \
+        "$TOP/client/usbexport.c" \
         "$SYSROOT/$1/usr/lib/$2/liblz4.a"
     "$2-strip" "$STAGE/sremfb-client-$1"
 }
@@ -71,8 +72,8 @@ EOF
 
 # ---- sremfb-server (amd64) ----
 ROOT=$STAGE/server
-mkdir -p "$ROOT/usr/bin" "$ROOT/usr/lib/systemd/user" \
-         "$ROOT/usr/lib/systemd/system" \
+mkdir -p "$ROOT/usr/bin" "$ROOT/usr/libexec" "$ROOT/usr/lib/systemd/user" \
+         "$ROOT/usr/lib/systemd/system" "$ROOT/usr/lib/tmpfiles.d" \
          "$ROOT/usr/lib/udev/hwdb.d" "$ROOT/usr/lib/udev/rules.d" \
          "$ROOT/etc/modules-load.d" "$ROOT/etc/modprobe.d"
 install -m 755 "$TOP/server/sremfb-server" "$ROOT/usr/bin/sremfb-server"
@@ -81,6 +82,16 @@ sed 's|/usr/local/bin|/usr/bin|' "$TOP/systemd/sremfb-server.service" \
     > "$ROOT/usr/lib/systemd/user/sremfb-server.service"
 install -m 644 "$TOP/systemd/sremfb-evdi-perms.service" \
     "$ROOT/usr/lib/systemd/system/sremfb-evdi-perms.service"
+install -m 755 "$TOP/systemd/sremfb-usb-attach" \
+    "$ROOT/usr/libexec/sremfb-usb-attach"
+sed 's|/usr/local/libexec|/usr/libexec|' "$TOP/systemd/sremfb-usb.service" \
+    > "$ROOT/usr/lib/systemd/system/sremfb-usb.service"
+install -m 644 "$TOP/systemd/sremfb-usb.path" \
+    "$ROOT/usr/lib/systemd/system/sremfb-usb.path"
+install -m 644 "$TOP/systemd/sremfb-usb.timer" \
+    "$ROOT/usr/lib/systemd/system/sremfb-usb.timer"
+install -m 644 "$TOP/systemd/tmpfiles-sremfb.conf" \
+    "$ROOT/usr/lib/tmpfiles.d/sremfb.conf"
 install -m 644 "$TOP/systemd/61-sremfb-display-vendor.hwdb" \
     "$ROOT/usr/lib/udev/hwdb.d/"
 install -m 644 "$TOP/systemd/60-sremfb-evdi.rules" \
@@ -105,6 +116,9 @@ modprobe evdi || true
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload 2>/dev/null || true
     systemctl enable --now sremfb-evdi-perms.service 2>/dev/null || true
+    # téléport USB : /run/sremfb + réconciliateur usbip (root)
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/sremfb.conf 2>/dev/null || true
+    systemctl enable --now sremfb-usb.path sremfb-usb.timer 2>/dev/null || true
 fi
 # secours si systemd absent (chroot, etc.)
 if [ -e /sys/devices/evdi/add ]; then
@@ -120,12 +134,13 @@ cat > "$ROOT/DEBIAN/postrm" <<'EOF'
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     if command -v systemctl >/dev/null 2>&1; then
         systemctl disable --now sremfb-evdi-perms.service 2>/dev/null || true
+        systemctl disable --now sremfb-usb.path sremfb-usb.timer 2>/dev/null || true
     fi
 fi
 EOF
 chmod 755 "$ROOT/DEBIAN/postrm"
 make_deb sremfb-server amd64 \
-"Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms, libx264-164
+"Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms, libx264-164, usbip
 Conflicts: rfb-server
 Replaces: rfb-server
 Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
@@ -133,7 +148,8 @@ Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
  par son adresse MAC) et transfère les zones modifiées, compressées en
  LZ4, vers les sremfb-client du LAN (allowlist CIDR). Mesure la
  congestion par le délai et bascule en H.264 (x264) les clients qui
- savent le décoder quand le lien sature."
+ savent le décoder quand le lien sature. Attache par usbip les
+ périphériques USB que les clients exportent (téléport USB)."
 
 # ---- sremfb-client (arm64 + armhf) ----
 for arch in arm64 armhf; do
@@ -164,14 +180,17 @@ EOF
     chmod 755 "$ROOT/DEBIAN/postinst"
     make_deb sremfb-client "$arch" \
 "Depends: libc6
+Recommends: usbip
 Conflicts: rfb-client
 Replaces: rfb-client
 Description: sRemFB, écran virtuel réseau — client framebuffer
  Reçoit les frames d'un sremfb-server et les écrit directement dans
  /dev/fb0 ; éteint la dalle quand le serveur est absent ou blanke,
- reflète le débranchement de la dalle, et décode le H.264 adaptatif
- en matériel (V4L2 M2M, ex. Pi 3) quand le SBC en dispose.
- LZ4 lié en statique : aucune autre dépendance."
+ reflète le débranchement de la dalle, décode le H.264 adaptatif
+ en matériel (V4L2 M2M, ex. Pi 3) quand le SBC en dispose, et exporte
+ les périphériques USB éligibles vers le serveur (usbip, paquet
+ usbip requis pour cette fonction).
+ LZ4 lié en statique : aucune autre dépendance obligatoire."
 done
 
 echo "== paquets dans $DIST :"

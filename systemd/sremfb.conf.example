@@ -15,3 +15,8 @@ SREMFB_SERVER=192.0.2.1
 # Don't watch the panel's DRM connector (unplugging the panel then no
 # longer unplugs the virtual monitor on the server):
 # SREMFB_NO_HOTPLUG=1
+
+# Téléport USB (usbip) : auto = actif sauf Raspberry Pi 3.
+# SREMFB_USB=1
+# SREMFB_USB_ALLOW=046d:c52b,1a86
+# SREMFB_USB_DENY=2e8a:0011

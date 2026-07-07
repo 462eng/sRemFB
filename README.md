@@ -72,6 +72,17 @@ GNOME blanks its outputs (DPMS pass-through).
   client disconnects and the virtual monitor vanishes from the desktop —
   exactly like pulling the cable of a real screen. Replugging it brings
   the monitor back (watched via the DRM connector status, ~2 s).
+- **USB teleport**: devices plugged into the SBC (keyboard, mouse,
+  storage, serial adapters) are "teleported" to the PC over **usbip**
+  while the client streams — plugged in behind the screen, used as
+  local PC devices, detached as soon as the client leaves. Measured
+  policy, not configured: HID + storage + serial; never hubs, never a
+  device carrying an active network interface (a Pi's Ethernet is
+  USB!), never a mounted disk; overrides via
+  `SREMFB_USB_ALLOW`/`SREMFB_USB_DENY` (hex `vendor[:product]`).
+  Disabled by default on a Pi 3 (`SREMFB_USB=1` or `--usb` to force).
+  Requires the `usbip` package on both sides; `usbipd` listens on the
+  SBC's port 3240 — same trust model as the rest (dedicated LAN).
 - Client-side formats: 32bpp XRGB8888 (passthrough) and 16bpp RGB565
   (server-side conversion with ordered dithering; `SREMFB_NO_DITHER=1` to
   turn it off).
@@ -133,6 +144,10 @@ screen "unplugs".
 | `SREMFB_NO_H264` (server) | — | never switch to H.264 (delay still measured/logged) |
 | `SREMFB_FORCE_H264` (server) | — | pin H.264 on capable clients (A/B test) |
 | `SREMFB_NO_HOTPLUG` (client) | — | don't watch the panel's DRM connector |
+| `SREMFB_USB` (client) | auto | `1`/`0`: force/disable USB teleport (auto: on except Pi 3) |
+| `SREMFB_USB_ALLOW` (client) | — | `vendor[:product]` ids always teleported (network/disk guards still win) |
+| `SREMFB_USB_DENY` (client) | — | `vendor[:product]` ids never teleported |
+| `SREMFB_NO_USB` (server) | — | never attach clients' USB devices |
 
 The client runs as root by default (`/dev/fb0` access + console ioctls).
 The server runs as the session user: access to `/dev/dri/cardN` (the EVDI

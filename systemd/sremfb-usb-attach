@@ -1,0 +1,59 @@
+#!/bin/sh
+# sRemFB — réconciliateur usbip (root).
+#
+# Les clients sremfb qui exportent leurs périphériques USB (usbipd, flag
+# hello USB) sont matérialisés par sremfb-server dans /run/sremfb/usb-<ip>
+# tant qu'ils streament. Ce script rend l'état vhci conforme :
+#   - attache tout busid exportable d'un pair présent ;
+#   - détache tout port dont le pair a disparu.
+# Idempotent, sans état propre (les enregistrements /var/run/vhci_hcd/portN
+# sont tenus par usbip attach/detach). Déclenché par sremfb-usb.path à
+# chaque changement de /run/sremfb et par sremfb-usb.timer (rattrapage,
+# hotplug USB côté client).
+
+command -v usbip >/dev/null 2>&1 || exit 0
+modprobe vhci-hcd 2>/dev/null || true
+mkdir -p /run/sremfb
+
+# le port de cet enregistrement est-il réellement importé (sta 6) ?
+port_used() {
+    awk -v p="$1" '$2 + 0 == p + 0 && $3 + 0 == 6 { f = 1 } END { exit !f }' \
+        /sys/devices/platform/vhci_hcd.0/status* 2>/dev/null
+}
+
+# --- purge/détachement ---------------------------------------------------
+for rec in /var/run/vhci_hcd/port*; do
+    [ -f "$rec" ] || continue
+    port=${rec##*port}
+    if ! port_used "$port"; then
+        rm -f "$rec"           # périmé (le client a repris le device) :
+        continue               # sans ça, jamais ré-attaché
+    fi
+    read -r host _ _ < "$rec" || continue
+    if [ ! -e "/run/sremfb/usb-$host" ]; then
+        usbip detach -p "$port" >/dev/null 2>&1 || rm -f "$rec"
+    fi
+done
+
+# --- attacher ce que les pairs présents exportent -----------------------
+for f in /run/sremfb/usb-*; do
+    [ -f "$f" ] || continue
+    ip=${f##*/usb-}
+    usbip list -r "$ip" 2>/dev/null |
+    sed -n 's/^ *\([0-9][0-9.-]*\): .*/\1/p' | while IFS= read -r busid; do
+        attached=0
+        for rec in /var/run/vhci_hcd/port*; do
+            [ -f "$rec" ] || continue
+            read -r h _ b < "$rec" || continue
+            if [ "$h" = "$ip" ] && [ "$b" = "$busid" ]; then
+                attached=1
+                break
+            fi
+        done
+        if [ "$attached" = 0 ]; then
+            usbip attach -r "$ip" -b "$busid" >/dev/null 2>&1 &&
+                logger -t sremfb-usb "attached $busid from $ip" || true
+        fi
+    done
+done
+exit 0

@@ -74,7 +74,7 @@ Envoyé une seule fois, juste après la connexion.
 |---|---|---|
 | `magic` | `u32` | `SREMFB_MAGIC` |
 | `proto_ver` | `u16` | `SREMFB_PROTO_VER` (2) |
-| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = le client accepte LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = le client renvoie les PING en PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = le client décode le H.264 (4:2:0, Annex B) à sa résolution |
+| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = le client accepte LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = le client renvoie les PING en PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = le client décode le H.264 (4:2:0, Annex B) à sa résolution · bit 3 `SREMFB_HELLO_FLAG_USB` = le client exporte ses périphériques USB par usbip (voir « Téléport USB ») |
 | `xres`, `yres` | `u16` | résolution visible du framebuffer |
 | `bpp` | `u8` | bits par pixel du fb : 16 ou 32 |
 | `pixfmt` | `u8` | `enum sremfb_pixfmt` |
@@ -216,3 +216,13 @@ ancien client laisse les bits 1-2 à zéro (le serveur ne pingue ni
 n'encode jamais), un ancien serveur envoie un octet `flags` nul (le
 client n'écrit jamais en montant), et chaque combinaison conserve le
 comportement v2 de base.
+
+## Téléport USB
+
+Hors-bande, aucun message sRemFB : quand le client met
+`SREMFB_HELLO_FLAG_USB`, il promet qu'un `usbipd` standard écoute sur
+son port TCP 3240 avec les périphériques éligibles liés à `usbip-host`.
+Le serveur les attache (vhci-hcd) tant que le client streame et les
+détache à sa déconnexion — la même vivacité de 6 s qui débranche
+l'écran virtuel libère aussi les périphériques USB. Tout passe par le
+protocole usbip standard ; sRemFB n'orchestre que le cycle de vie.

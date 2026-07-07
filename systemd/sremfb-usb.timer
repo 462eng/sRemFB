@@ -1,0 +1,10 @@
+[Unit]
+Description=sRemFB USB teleport periodic reconcile (client-side hotplug)
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=15s
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

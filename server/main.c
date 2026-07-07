@@ -33,6 +33,77 @@ static gboolean mac_is_zero(const uint8_t mac[6])
     return memcmp(mac, zero, 6) == 0;
 }
 
+/* ------------------------------------------------------ USB teleport */
+
+/* The client exports USB devices over usbip (hello flag bit): a peer
+ * file in /run/sremfb materializes "this client is streaming". The
+ * vhci attach needs root and we run as the session user, so a root-side
+ * systemd unit shipped with the package (sremfb-usb.{path,timer} ->
+ * /usr/libexec/sremfb-usb-attach) reconciles the attachments with these
+ * files: attach what streaming peers export, detach what left. */
+#define SREMFB_USB_RUNDIR "/run/sremfb"
+
+static void usb_peer_path(const SremfbClient *c, char *out, size_t len)
+{
+    char ip[64];
+    char *colon;
+
+    g_strlcpy(ip, c->peer, sizeof(ip));
+    colon = strrchr(ip, ':');          /* peer is "ip:port" */
+    if (colon)
+        *colon = '\0';
+    g_snprintf(out, len, SREMFB_USB_RUNDIR "/usb-%s", ip);
+}
+
+void sremfb_usb_peer_add(SremfbClient *c)
+{
+    char path[128];
+
+    if (!c->usb_cap || getenv("SREMFB_NO_USB"))
+        return;
+    usb_peer_path(c, path, sizeof(path));
+    if (!g_file_set_contents(path, c->macstr, -1, NULL)) {
+        static gboolean warned;
+        if (!warned) {
+            warned = TRUE;
+            g_message("[%s] cannot write %s — USB teleport needs the "
+                      "packaged /run/sremfb dir and sremfb-usb units",
+                      c->macstr, path);
+        }
+        return;
+    }
+    g_message("[%s] usb devices announced, attaching from %s", c->macstr,
+              c->peer);
+}
+
+void sremfb_usb_peer_remove(SremfbClient *c)
+{
+    char path[128];
+
+    if (!c->usb_cap)
+        return;
+    usb_peer_path(c, path, sizeof(path));
+    unlink(path);
+}
+
+/* Server (re)start: no client streams yet, drop stale peers so the
+ * reconciler detaches leftovers from a previous run. */
+static void usb_peers_clear(void)
+{
+    GDir *d = g_dir_open(SREMFB_USB_RUNDIR, 0, NULL);
+    const char *n;
+
+    if (!d)
+        return;
+    while ((n = g_dir_read_name(d)))
+        if (g_str_has_prefix(n, "usb-")) {
+            gchar *p = g_build_filename(SREMFB_USB_RUNDIR, n, NULL);
+            unlink(p);
+            g_free(p);
+        }
+    g_dir_close(d);
+}
+
 /* Client socket died (or never got a working monitor): unplug the
  * connector, release the EVDI device and forget the client. Its position
  * is safe in monitors.xml thanks to the MAC-derived EDID identity. */
@@ -40,6 +111,7 @@ void sremfb_client_lost(SremfbClient *c)
 {
     g_clear_handle_id(&c->lost_id, g_source_remove);
     g_clear_handle_id(&c->watch_id, g_source_remove);
+    sremfb_usb_peer_remove(c);
     sremfb_xmit_reset(c);
     if (c->fd >= 0) {
         close(c->fd);
@@ -192,6 +264,7 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     c->lz4 = (hello.flags & SREMFB_HELLO_FLAG_LZ4) != 0;
     c->feedback = (hello.flags & SREMFB_HELLO_FLAG_FEEDBACK) != 0;
     c->h264_cap = (hello.flags & SREMFB_HELLO_FLAG_H264) != 0;
+    c->usb_cap = (hello.flags & SREMFB_HELLO_FLAG_USB) != 0;
     g_strlcpy(c->peer, peer, sizeof(c->peer));
     g_snprintf(c->macstr, sizeof(c->macstr),
                "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -199,10 +272,10 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
                hello.mac[3], hello.mac[4], hello.mac[5]);
 
     g_message("[%s] client %s: fb %ux%u %ubpp pixfmt %u lz4=%c ping=%c "
-              "h264=%c model \"%.13s\"",
+              "h264=%c usb=%c model \"%.13s\"",
               c->macstr, peer, hello.xres, hello.yres, hello.bpp,
               hello.pixfmt, c->lz4 ? 'y' : 'n', c->feedback ? 'y' : 'n',
-              c->h264_cap ? 'y' : 'n',
+              c->h264_cap ? 'y' : 'n', c->usb_cap ? 'y' : 'n',
               hello.model[0] ? hello.model : "(none)");
 
     if (!sremfb_evdi_acquire(c)) {
@@ -277,6 +350,7 @@ int main(int argc, char **argv)
         }
         sremfb_evdi_reset(n);
     }
+    usb_peers_clear();
 
     if (!sremfb_evdi_probe()) {
         g_printerr("no evdi device — load the module first (modprobe evdi, "

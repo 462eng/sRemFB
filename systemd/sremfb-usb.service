@@ -1,0 +1,6 @@
+[Unit]
+Description=sRemFB USB teleport reconciler (usbip attach/detach)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/sremfb-usb-attach

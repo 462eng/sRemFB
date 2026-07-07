@@ -106,6 +106,7 @@ struct SremfbClient {
     /* negotiated feature bits (v2 + hello flags) */
     gboolean feedback;         /* client echoes PING as PONG */
     gboolean h264_cap;         /* client decodes H.264 */
+    gboolean usb_cap;          /* client exports USB devices (usbip) */
 
     /* upstream (PONG) reassembly */
     uint8_t recvbuf[64];
@@ -180,6 +181,8 @@ struct SremfbServer {
 /* main.c */
 void sremfb_client_lost(SremfbClient *c);
 void sremfb_schedule_client_lost(SremfbClient *c);
+void sremfb_usb_peer_add(SremfbClient *c);     /* streaming + usb_cap */
+void sremfb_usb_peer_remove(SremfbClient *c);
 
 /* net.c */
 int      net_listen(uint16_t port);

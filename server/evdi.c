@@ -230,6 +230,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
          * hotplugs — rearm the self-heal budget (it only guards against
          * creating devices forever when mutter is truly gone) */
         c->srv->selfheal_left = 8;
+        sremfb_usb_peer_add(c);
         g_message("[%s] streaming %dx%d", c->macstr, mode.width, mode.height);
     }
     sremfb_evdi_kick(c);
