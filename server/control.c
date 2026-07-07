@@ -38,6 +38,8 @@
 #define DAMAGE_GAP_US      100000    /* grabs closer than this = continuous */
 #define DAMAGE_CONT_US     1000000   /* ... for at least this long */
 #define ENTER_CONFIRM_US   500000
+#define RAW_GRACE_US       2000000   /* ignore the burst of our own exit
+                                        snapshot right after H264->RAW */
 #define EXIT_CALM_US       10000000
 #define EXIT_HEADROOM      0.5       /* predicted RAW must fit in half the
                                         measured capacity */
@@ -131,6 +133,18 @@ static double raw_predicted_Bps(const SremfbClient *c)
     return c->raw_rate_Bps / ratio;
 }
 
+/* The RAW path can't deliver: either the echo delay says everything
+ * queues up, or damage arrives continuously but fewer than FPS_MIN
+ * frames make it through. Entry condition for H.264, and the moments
+ * when the achieved wire rate *is* the path's capacity. */
+static gboolean raw_pressure(const SremfbClient *c, gint64 now)
+{
+    return c->delay_ewma_us > DELAY_HI_US ||
+           (c->grab_fps > 0.1 && c->grab_fps < FPS_MIN &&
+            damage_continuous(c, now) &&
+            now - c->damage_cont_us > DAMAGE_CONT_US);
+}
+
 static void ctl_evaluate(SremfbClient *c)
 {
     gint64 now = g_get_monotonic_time();
@@ -138,16 +152,17 @@ static void ctl_evaluate(SremfbClient *c)
     switch (c->ctl_state) {
     case SREMFB_CTL_RAW_STEADY:
     case SREMFB_CTL_RAW_SUSPECT: {
-        gboolean pressure =
-            c->delay_ewma_us > DELAY_HI_US ||
-            (c->grab_fps > 0.1 && c->grab_fps < FPS_MIN &&
-             damage_continuous(c, now) &&
-             now - c->damage_cont_us > DAMAGE_CONT_US);
+        gboolean pressure = raw_pressure(c, now);
 
         if (env_force_h264() && h264_allowed(c))
             pressure = TRUE;
 
         if (c->ctl_state == SREMFB_CTL_RAW_STEADY) {
+            /* a fresh RAW period starts with our own full-frame
+             * snapshot on the wire — its queueing delay is not the
+             * content's pressure, let it flush before judging */
+            if (c->ctl_since_us && now - c->ctl_since_us < RAW_GRACE_US)
+                break;
             if (pressure) {
                 ctl_set_state(c, SREMFB_CTL_RAW_SUSPECT);
                 g_message("[%s] pressure: delay %.0f ms, %.1f fps — "
@@ -165,10 +180,19 @@ static void ctl_evaluate(SremfbClient *c)
                 break;
             }
             sremfb_xmit_set_mode(c, SREMFB_XMIT_H264);
-            if (c->xmit_mode == SREMFB_XMIT_H264)
+            if (c->xmit_mode == SREMFB_XMIT_H264) {
+                /* re-entering right after an exit means the RAW probe
+                 * failed: the content/link situation hasn't changed, so
+                 * back the next probe off exponentially (flap damping) */
+                if (c->ctl_exit_us &&
+                    now - c->ctl_exit_us < 8 * G_USEC_PER_SEC)
+                    c->ctl_probe_backoff = MIN(c->ctl_probe_backoff + 1, 6);
+                else
+                    c->ctl_probe_backoff = 0;
                 ctl_set_state(c, SREMFB_CTL_H264_ACTIVE);
-            else
+            } else {
                 ctl_set_state(c, SREMFB_CTL_RAW_STEADY);  /* enc failed */
+            }
         }
         break;
     }
@@ -187,32 +211,54 @@ static void ctl_evaluate(SremfbClient *c)
             ctl_set_state(c, SREMFB_CTL_H264_ACTIVE);
             break;
         }
-        if (c->delay_ewma_us > DELAY_LO_US) {
-            c->ctl_calm_us = now;              /* calm streak broken */
-            break;
-        }
         if (!c->ctl_calm_us)
             c->ctl_calm_us = now;
         gint64 calm = now - c->ctl_calm_us;
+        /* the calm streak only breaks on real pressure (> DELAY_HI,
+         * back to ACTIVE above) — an isolated blip (the top bar clock
+         * repainting once a minute) merely defers the exit *moment*,
+         * otherwise long streaks would be unreachable forever */
+        if (c->delay_ewma_us > DELAY_LO_US)
+            break;                             /* not calm right now */
         if (calm < EXIT_CALM_US)
             break;
         /* The predictor keeps us in H.264 while RAW would clearly drown
-         * the measured capacity again — but that measurement can go
-         * stale (link healed, damage pattern changed), so after a much
-         * longer calm streak we probe RAW anyway; if the pressure comes
-         * back, re-entry only takes ~a second. */
-        if (c->capacity_Bps > 0.0 &&
-            raw_predicted_Bps(c) > EXIT_HEADROOM * c->capacity_Bps &&
-            calm < 3 * (gint64)EXIT_CALM_US)
+         * the measured capacity again — on *average* rate, or per
+         * *burst*: even at a low fps, one frame whose wire time eats
+         * into the pressure threshold re-triggers the entry all by
+         * itself (e.g. 400 KB rects on a slow link = 100+ ms spikes).
+         * The measurement can go stale though (link healed, damage
+         * pattern changed), so after a much longer calm streak we probe
+         * RAW anyway. Never probe while the damage still hammers
+         * continuously: that's the exact content RAW already failed on,
+         * and each probe costs the user a visible stutter. */
+        gboolean raw_wont_fit = FALSE;
+        if (c->capacity_Bps > 0.0) {
+            double pred = raw_predicted_Bps(c);
+            raw_wont_fit = pred > EXIT_HEADROOM * c->capacity_Bps;
+            if (c->grab_fps > 0.1) {
+                double frame_us = pred / c->grab_fps / c->capacity_Bps *
+                                  G_USEC_PER_SEC;
+                if (frame_us > EXIT_HEADROOM * DELAY_HI_US)
+                    raw_wont_fit = TRUE;
+            }
+        }
+        if (raw_wont_fit &&
+            (calm < (3ll << c->ctl_probe_backoff) * (gint64)EXIT_CALM_US ||
+             damage_continuous(c, now)))
             break;
         sremfb_xmit_set_mode(c, SREMFB_XMIT_RAW);
         ctl_set_state(c, SREMFB_CTL_RAW_STEADY);
+        c->ctl_exit_us = now;
         break;
     }
     }
 }
 
-/* AIMD on the encoder bitrate, one step per echo. */
+/* AIMD on the encoder bitrate, one step per echo. Growth only while
+ * frames are actually being encoded: a calm delay on an idle stream
+ * proves nothing (it used to inflate the bitrate to the ceiling between
+ * damage bursts, and the next burst would slam the link at 40 Mbit). */
 static void ctl_aimd(SremfbClient *c)
 {
     if (c->xmit_mode != SREMFB_XMIT_H264 || !c->enc)
@@ -220,7 +266,8 @@ static void ctl_aimd(SremfbClient *c)
     int kbps = sremfb_enc_bitrate(c->enc);
     if (c->delay_ewma_us > DELAY_HI_US)
         kbps = (int)(kbps * AIMD_DOWN);
-    else if (c->delay_ewma_us < DELAY_AIMD_LO_US)
+    else if (c->delay_ewma_us < DELAY_AIMD_LO_US &&
+             g_get_monotonic_time() - c->last_enc_us < G_USEC_PER_SEC / 2)
         kbps += AIMD_UP_KBPS;
     else
         return;
@@ -242,13 +289,13 @@ gboolean sremfb_ctl_skip_encode(SremfbClient *c)
            (gint64)(G_USEC_PER_SEC / FPS_MIN);
 }
 
-/* Opening bitrate for a new H.264 episode: a bit under the measured link
- * capacity when we have one, a safe middle ground otherwise. */
+/* Opening bitrate for a new H.264 episode. Always the fixed middle
+ * ground: the measured capacity is the *raw path's* end-to-end limit
+ * (client blit included), which says nothing about what H.264 needs —
+ * the AIMD loop converges from here within seconds anyway. */
 int sremfb_ctl_initial_kbps(const SremfbClient *c)
 {
-    if (c->capacity_Bps > 0.0)
-        return (int)CLAMP(0.8 * c->capacity_Bps * 8.0 / 1000.0,
-                          KBPS_MIN, KBPS_MAX);
+    (void)c;
     return KBPS_START;
 }
 
@@ -262,6 +309,15 @@ void sremfb_ctl_on_pong(SremfbClient *c, uint64_t t_echo_us)
     c->last_pong_us = now;
     if (c->pings_outstanding)
         c->pings_outstanding--;
+    /* echoes queued behind our own one-shot burst (initial paint, exit
+     * snapshot) measure that burst, not the content: keep them out of
+     * the pressure signal during the RAW grace period (liveness above
+     * is still fed) */
+    if (c->ctl_state == SREMFB_CTL_RAW_STEADY && c->ctl_since_us &&
+        now - c->ctl_since_us < RAW_GRACE_US) {
+        ctl_evaluate(c);
+        return;
+    }
     c->delay_ewma_us = EWMA(c->delay_ewma_us, delay, 0.3);
     ctl_aimd(c);
     ctl_evaluate(c);
@@ -294,8 +350,12 @@ void sremfb_ctl_on_grab(SremfbClient *c, size_t raw_bytes, size_t wire_bytes)
         double wire_rate = (double)c->cap_win_bytes * G_USEC_PER_SEC / win;
         double raw_rate = (double)c->raw_win_bytes * G_USEC_PER_SEC / win;
         c->raw_rate_Bps = EWMA(c->raw_rate_Bps, raw_rate, 0.3);
-        /* saturated link => achieved rate ~= capacity */
-        if (c->delay_ewma_us > DELAY_HI_US && wire_rate > 0)
+        /* RAW under pressure => the achieved wire rate IS the path's
+         * end-to-end capacity (network and client alike). Never learn
+         * from H.264 periods: their wire rate is deliberately tiny and
+         * says nothing about what the path could carry. */
+        if (c->xmit_mode == SREMFB_XMIT_RAW && wire_rate > 0 &&
+            raw_pressure(c, now))
             c->capacity_Bps = EWMA(c->capacity_Bps, wire_rate, 0.3);
         if (c->xmit_mode == SREMFB_XMIT_RAW && c->cap_win_bytes > 0)
             c->lz4_ratio_ewma = EWMA(c->lz4_ratio_ewma,
@@ -351,6 +411,9 @@ void sremfb_ctl_start(SremfbClient *c)
 {
     c->xmit_mode = SREMFB_XMIT_RAW;
     ctl_set_state(c, SREMFB_CTL_RAW_STEADY);
+    /* arm the RAW grace period: the initial full-frame paint is a burst
+     * of our own making, not the content's pressure */
+    c->ctl_since_us = g_get_monotonic_time();
     c->delay_ewma_us = 0.0;
     c->grab_fps = 0.0;
     c->last_grab_us = 0;

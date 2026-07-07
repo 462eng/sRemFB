@@ -60,8 +60,11 @@ et quand GNOME blanke ses écrans (DPMS transmis).
   pression retombe. Par client et entièrement négocié : le client
   n'annonce la capacité que s'il a un décodeur matériel V4L2 stateful
   (Raspberry Pi ≤ 3 : `/dev/video10`) ; tout le reste garde le chemin
-  RAW/LZ4. Aucune limite à configurer — la capacité du lien s'apprend
-  par la mesure. Les mêmes PING servent de battement de cœur : une
+  RAW/LZ4. Côté SBC l'affichage tourne dans son propre thread et saute
+  les frames en retard (*framedrop*) : ni le décodeur ni le réseau ne
+  bloquent sur l'écriture framebuffer, la dalle montre toujours la
+  frame la plus fraîche. Aucune limite à configurer — la capacité du
+  lien s'apprend par la mesure. Les mêmes PING servent de battement de cœur : une
   coupure réseau débranche l'écran virtuel et passe la dalle en « no
   signal » en ~6 s (repli TCP ~20-25 s avec un ancien pair).
 - **Hotplug de la dalle répercuté** : si la dalle du SBC est débranchée,

@@ -2,7 +2,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -Wall -Wextra -I..
 
 sremfb-client: sremfb-client.c v4l2dec.c v4l2dec.h ../protocol.h
-	$(CC) $(CFLAGS) -o $@ sremfb-client.c v4l2dec.c -llz4
+	$(CC) $(CFLAGS) -pthread -o $@ sremfb-client.c v4l2dec.c -llz4
 
 clean:
 	rm -f sremfb-client rfb-client

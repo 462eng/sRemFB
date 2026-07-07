@@ -260,12 +260,17 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    /* recreate fresh devices (preserving their number) when we can:
-     * survivors of a previous instance wedge mutter on reopen */
+    /* recreate fresh devices when we can: survivors of a previous
+     * instance wedge mutter on reopen. The number comes from the module
+     * parameter (what a boot would create) — the *runtime* count is not
+     * trustworthy: self-heal leftovers inflate it, an external
+     * remove_all deflates it. */
     {
         gchar *cnt = NULL;
         unsigned n = 2;
-        if (g_file_get_contents("/sys/devices/evdi/count", &cnt, NULL, NULL)) {
+        if (g_file_get_contents(
+                "/sys/module/evdi/parameters/initial_device_count",
+                &cnt, NULL, NULL)) {
             n = (unsigned)CLAMP(atoi(cnt), 1, 16);
             g_free(cnt);
         }

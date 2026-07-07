@@ -383,9 +383,35 @@ static void recycle_output(void)
     }
 }
 
-/* Dequeues decoded frames, hands them to the display, requeues. */
+static int cap_qbuf(unsigned idx)
+{
+    struct v4l2_plane planes[VIDEO_MAX_PLANES] = {0};
+    struct v4l2_buffer buf = {
+        .index = idx,
+        .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+        .memory = V4L2_MEMORY_MMAP,
+        .m.planes = planes,
+        .length = 1,
+    };
+    return xioctl(D.fd, VIDIOC_QBUF, &buf);
+}
+
+void v4l2dec_release(int buf_index)
+{
+    if (D.fd < 0 || buf_index < 0 || (unsigned)buf_index >= D.cap_nbufs)
+        return;
+    cap_qbuf((unsigned)buf_index);
+}
+
+/* Dequeues decoded frames and hands only the *newest* one to the
+ * display; anything older goes straight back to the driver (frame
+ * drop). The display blit — tens of ms into an uncached fb on a Pi 3 —
+ * therefore never back-pressures the decoder or the TCP stream, and
+ * what's on the panel is always the freshest decoded frame. */
 static int drain_capture(void)
 {
+    int have = -1;
+
     if (!D.cap_ready)
         return 0;
     for (;;) {
@@ -399,28 +425,40 @@ static int drain_capture(void)
         if (xioctl(D.fd, VIDIOC_DQBUF, &buf) < 0) {
             if (errno == EPIPE)
                 D.saw_last = 1;    /* drained past the STOP point */
-            return 0;
+            break;
         }
-        if (buf.index >= D.cap_nbufs)
+        if (buf.index >= D.cap_nbufs) {
+            if (have >= 0)
+                cap_qbuf((unsigned)have);
             return -1;
-
-        if (planes[0].bytesused > 0) {
-            struct v4l2dec_frame f = {
-                .data = (const uint8_t *)D.cap_map[buf.index],
-                .fourcc = D.cap_fourcc,
-                .w = D.vis_w,
-                .h = D.vis_h,
-                .stride = D.cap_stride,
-                .coded_h = D.coded_h,
-            };
-            v4l2dec_emit(&f);
         }
         if (buf.flags & V4L2_BUF_FLAG_LAST)
             D.saw_last = 1;
 
-        if (xioctl(D.fd, VIDIOC_QBUF, &buf) < 0)
+        if (planes[0].bytesused == 0) {
+            if (cap_qbuf(buf.index) < 0)
+                return -1;
+            continue;
+        }
+        if (have >= 0 && cap_qbuf((unsigned)have) < 0)   /* dropped */
+            return -1;
+        have = (int)buf.index;
+    }
+
+    if (have >= 0) {
+        struct v4l2dec_frame f = {
+            .data = (const uint8_t *)D.cap_map[have],
+            .fourcc = D.cap_fourcc,
+            .w = D.vis_w,
+            .h = D.vis_h,
+            .stride = D.cap_stride,
+            .coded_h = D.coded_h,
+            .buf_index = have,
+        };
+        if (!v4l2dec_emit(&f) && cap_qbuf((unsigned)have) < 0)
             return -1;
     }
+    return 0;
 }
 
 int v4l2dec_pump(void)

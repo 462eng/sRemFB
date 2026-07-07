@@ -60,8 +60,11 @@ GNOME blanks its outputs (DPMS pass-through).
   signal) and back once the pressure subsides. Per-client and fully
   negotiated: the client advertises the capability only if it has a
   V4L2 stateful hardware decoder (Raspberry Pi ≤ 3: `/dev/video10`);
-  everything else keeps the plain RAW/LZ4 path. No limits to configure —
-  the link capacity is learned by measurement. The same PINGs double as
+  everything else keeps the plain RAW/LZ4 path. On the SBC the display
+  runs in its own thread and drops late frames: neither the decoder nor
+  the network ever blocks on the framebuffer write, and the panel always
+  shows the freshest frame. No limits to configure — the link capacity
+  is learned by measurement. The same PINGs double as
   a liveness heartbeat: a network cut unplugs the virtual monitor and
   drops the panel to "no signal" in ~6 s (~20-25 s TCP fallback with an
   older peer).

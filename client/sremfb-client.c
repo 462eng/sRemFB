@@ -62,6 +62,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -506,8 +507,9 @@ static void yuv_row_to_fb(uint8_t *dst, const uint8_t *yrow,
     }
 }
 
-/* Callback from v4l2dec.c: one decoded frame -> framebuffer. */
-void v4l2dec_emit(const struct v4l2dec_frame *f)
+/* Blit one decoded frame to the framebuffer: RGB565 direct rows, or
+ * CPU YUV conversion row by row. */
+static void frame_to_fb(const struct v4l2dec_frame *f)
 {
     unsigned w = f->w < C.stream_w ? f->w : C.stream_w;
     unsigned h = f->h < C.stream_h ? f->h : C.stream_h;
@@ -540,6 +542,98 @@ void v4l2dec_emit(const struct v4l2dec_frame *f)
     }
     if (C.blanked)
         fb_set_blank(0);
+}
+
+/*
+ * The blit runs in its own thread behind a one-frame mailbox. Writing a
+ * full 1080p frame into an uncached framebuffer takes tens of ms on a
+ * Pi 3; done inline it back-pressures the decoder and the TCP stream
+ * until whole seconds of display lag pile up in the queues. Here the
+ * decode path always hands over the newest frame — one arriving while
+ * the previous still waits simply replaces it (frame drop, at whatever
+ * rate the blit sustains) — so the network and decoder never block on
+ * the display, and a second core absorbs the fb writes.
+ */
+static pthread_mutex_t blit_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t blit_cv = PTHREAD_COND_INITIALIZER;
+static struct v4l2dec_frame blit_next;
+static int blit_have;                  /* a frame waits in the mailbox */
+static int blit_busy;                  /* the thread is blitting one */
+static int blit_up = -1;               /* -1 not started, 0 failed, 1 up */
+
+static void blit_wait(void)            /* 200 ms cap: notice g_stop */
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ts.tv_nsec += 200 * 1000000L;
+    if (ts.tv_nsec >= 1000000000L) {
+        ts.tv_sec++;
+        ts.tv_nsec -= 1000000000L;
+    }
+    pthread_cond_timedwait(&blit_cv, &blit_mtx, &ts);
+}
+
+static void *blit_thread(void *arg)
+{
+    (void)arg;
+    pthread_mutex_lock(&blit_mtx);
+    while (!g_stop) {
+        if (!blit_have) {
+            blit_wait();
+            continue;
+        }
+        struct v4l2dec_frame f = blit_next;
+        blit_have = 0;
+        blit_busy = 1;
+        pthread_mutex_unlock(&blit_mtx);
+
+        frame_to_fb(&f);
+        v4l2dec_release(f.buf_index);
+
+        pthread_mutex_lock(&blit_mtx);
+        blit_busy = 0;
+        pthread_cond_broadcast(&blit_cv);
+    }
+    pthread_mutex_unlock(&blit_mtx);
+    return NULL;
+}
+
+/* Waits until the blit thread has nothing left to show. Required before
+ * the main thread writes the fb again (the RAW snapshot that closes an
+ * H.264 episode) and before the capture buffers go away (close). */
+static void blit_sync(void)
+{
+    if (blit_up != 1)
+        return;
+    pthread_mutex_lock(&blit_mtx);
+    while ((blit_have || blit_busy) && !g_stop)
+        blit_wait();
+    pthread_mutex_unlock(&blit_mtx);
+}
+
+/* Callback from v4l2dec.c: one decoded frame -> display. */
+int v4l2dec_emit(const struct v4l2dec_frame *f)
+{
+    if (blit_up < 0) {
+        pthread_t t;
+        blit_up = pthread_create(&t, NULL, blit_thread, NULL) == 0;
+        if (blit_up)
+            pthread_detach(t);
+        else
+            logmsg("cannot start blit thread, blitting inline");
+    }
+    if (!blit_up) {
+        frame_to_fb(f);
+        return 0;
+    }
+    pthread_mutex_lock(&blit_mtx);
+    if (blit_have)                     /* still unshown: drop it */
+        v4l2dec_release(blit_next.buf_index);
+    blit_next = *f;
+    blit_have = 1;
+    pthread_cond_broadcast(&blit_cv);
+    pthread_mutex_unlock(&blit_mtx);
+    return 1;
 }
 
 /* ------------------------------------------------------- panel edid */
@@ -950,10 +1044,15 @@ static void frame_loop(int fd)
             }
             if (C.test_sink) {
                 logmsg("H.264 sink: episode over");
-            } else if (C.dec_open && v4l2dec_drain() < 0) {
-                logmsg("H.264 drain failed — reconnecting without it");
-                C.h264_broken = 1;
-                break;
+            } else if (C.dec_open) {
+                if (v4l2dec_drain() < 0) {
+                    logmsg("H.264 drain failed — reconnecting without it");
+                    C.h264_broken = 1;
+                    break;
+                }
+                /* the RAW snapshot follows: let the last decoded frame
+                 * land before the main thread writes the fb again */
+                blit_sync();
             }
             continue;
         }
@@ -1021,6 +1120,7 @@ out:
     free(compbuf);
     free(aubuf);
     if (C.dec_open) {
+        blit_sync();               /* buffers are about to be unmapped */
         v4l2dec_close();
         C.dec_open = 0;
     }
@@ -1078,6 +1178,7 @@ static int decode_test(const char *path)
     logmsg("decoded %u access units", n);
     rc = 0;
 out:
+    blit_sync();
     v4l2dec_close();
     if (f)
         fclose(f);

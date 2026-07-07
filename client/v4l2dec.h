@@ -13,7 +13,8 @@
 #include <stdint.h>
 
 /* One decoded frame handed to the client for display. data points into
- * the driver's mmapped capture buffer, valid only during the callback.
+ * the driver's mmapped capture buffer; the buffer stays out of the
+ * decoder's rotation until v4l2dec_release(buf_index) puts it back.
  * For NV12/YU12 the chroma follows the luma at stride*coded_h. */
 struct v4l2dec_frame {
     const uint8_t *data;
@@ -21,10 +22,19 @@ struct v4l2dec_frame {
     uint32_t w, h;             /* visible size */
     uint32_t stride;           /* luma (or RGB) bytes per line */
     uint32_t coded_h;          /* buffer height (chroma plane offset) */
+    int buf_index;             /* capture buffer to release after use */
 };
 
-/* Implemented by sremfb-client.c: convert (if needed) and blit. */
-void v4l2dec_emit(const struct v4l2dec_frame *f);
+/* Implemented by sremfb-client.c: convert (if needed) and blit.
+ * Returns 1 if the frame (and its buffer) was kept for asynchronous
+ * display — the client then calls v4l2dec_release() when done — or 0
+ * if it is already finished with it. */
+int v4l2dec_emit(const struct v4l2dec_frame *f);
+
+/* Requeues a kept capture buffer to the decoder. Safe to call from a
+ * thread other than the one driving feed/pump (the kernel serializes
+ * per-queue buffer ioctls). */
+void v4l2dec_release(int buf_index);
 
 /* Scans /dev/video0..31 for an M2M decoder taking H.264; remembers the
  * node. Returns 1 if found (the hello then advertises H264). */

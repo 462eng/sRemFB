@@ -414,6 +414,10 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         c->st_grabs = c->st_rects = c->st_wire_bytes = c->st_raw_bytes = 0;
         c->st_since_us = g_get_monotonic_time();
         sremfb_ctl_start(c);
+        /* a connector lighting up proves mutter is alive and accepting
+         * hotplugs — rearm the self-heal budget (it only guards against
+         * creating devices forever when mutter is truly gone) */
+        c->srv->selfheal_left = 8;
         g_message("[%s] streaming %dx%d", c->macstr, mode.width, mode.height);
     }
     sremfb_evdi_kick(c);

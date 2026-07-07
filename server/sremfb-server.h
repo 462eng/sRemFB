@@ -94,6 +94,9 @@ struct SremfbClient {
     SremfbCtlState ctl_state;
     gint64 ctl_since_us;       /* entered current state */
     gint64 ctl_calm_us;        /* start of the current calm streak (0 = none) */
+    gint64 ctl_exit_us;        /* last H264->RAW switch (0 = never) */
+    int ctl_probe_backoff;     /* doublings of the RAW-probe period after
+                                  probes that immediately re-entered */
     guint ping_timer_id;
     gint64 last_ping_us;       /* when the last ping left */
     gint64 last_pong_us;       /* when the last echo came back (watchdog) */

@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.1.2}
+VERSION=${1:-1.1.3}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -42,7 +42,7 @@ make -s -C "$TOP/server"
 
 build_client() { # $1 = debian arch, $2 = triplet gcc
     echo "== build client ($1)"
-    "$2-gcc" -O2 -Wall -Wextra -I"$TOP" \
+    "$2-gcc" -O2 -Wall -Wextra -pthread -I"$TOP" \
         -I"$SYSROOT/$1/usr/include" \
         -o "$STAGE/sremfb-client-$1" \
         "$TOP/client/sremfb-client.c" "$TOP/client/v4l2dec.c" \
