@@ -184,6 +184,10 @@ comme fbdev le fait via `FBIOGET_VSCREENINFO`.
    **serveur EVDI actuel** → image OK, **sans déchirure** (vs blit fb),
    blank/unblank (GNOME éteint), hotplug (débrancher/rebrancher la dalle),
    Ctrl-C propre (DropMaster, VT rendue).
+   *Capacités vérifiées en lecture seule (modetest) : plane primaire
+   supporte `RG16` (RGB565) ET `XR24` (XRGB8888) en **LINEAR**, propriété
+   **DPMS** présente, mode préféré 1920x1080@60. → format primaire RG16,
+   repli XR24 ; blank par DPMS confirmé sur vc4.*
 2. **A20 (Banana Pi M1 / Cubieboard, sun4i, kernel patché)** : même test,
    **legacy modeset validé** sur sun4i (dumb buffers, page-flip, DPMS,
    format RGB565 ou repli XRGB8888). C'est le test de compat critique.
@@ -207,7 +211,7 @@ comme fbdev le fait via `FBIOGET_VSCREENINFO`.
 3. `drmSetMaster` sans logind : suffit-il d'être seul + la VT grab, ou
    besoin d'un `SETMASTER` explicite / droits sur `/dev/dri/cardN` (groupe
    `video`) — à vérifier sur A20 et Pi.
-4. RGB565 en scanout KMS : supporté par vc4 ET sun4i sur la cible ? sinon
-   XRGB8888 partout (le client convertit déjà).
+4. RGB565 en scanout KMS : **vc4 OK** (RG16 LINEAR vérifié sur Milim) ;
+   **sun4i/A20 à confirmer** sur la carte de test. Sinon XR24 partout.
 5. Nom de carte auto : itérer `/dev/dri/card*` et prendre celle qui a un
    connecteur *connected* (ignorer les cartes render-only, ex. v3d).
