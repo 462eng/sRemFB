@@ -133,6 +133,61 @@ spice-glib. On **garde la chaîne usbip existante** (déjà déployée, testée)
 Protocole sRemFB, `sremfb-client`, backend EVDI : **rien**. L'USB redirect
 est entièrement côté bridge (SBC export inchangé, serveur redirige).
 
+### 2.7 Stockage local exporté (gadget USB mass-storage) — U3
+
+Étendre le téléport USB à du **stockage local du SBC** (pas un périphérique
+USB physique) : un fichier-image (fs-on-file), un blockdev (partition,
+NVMe) ou une ISO, exposé à la cible comme **disque/CD USB** via un gadget
+`f_mass_storage` sur `dummy_hcd`, puis la **même chaîne** usbip → usbredir.
+
+```
+image / blockdev / ISO sur le SBC
+   ──►  gadget f_mass_storage (dummy_hcd, UDC virtuel, sans matériel)
+   ──►  disque USB sur le bus HÔTE du SBC
+   ──usbip──►  bridge (vhci)  ──SpiceUsbDeviceManager──►  DANS la VM
+```
+
+**Pourquoi ça marche (là où l'audio-gadget est écarté, §4.4)** : le
+stockage USB est **bulk** (fiable, retransmissible, tolérant à la latence)
+— le point fort d'usbip (son cas d'usage historique = disques USB
+réseau), pas isochrone. Le même mécanisme dummy_hcd, verdict opposé, à
+cause du type de transfert.
+
+**Backing LUN** : `f_mass_storage` accepte un **fichier** (fs-on-file),
+un **blockdev**, ou une **ISO** avec `cdrom=1` (→ la VM voit un lecteur CD
+USB). Mode **RW** (sauvegarde) ou **RO** (distribution / ISO).
+
+**Cas d'usage** :
+- **Destination de sauvegarde** (principal) : la VM sauvegarde sur le
+  stockage local du SBC — ex. le **NVMe de Milim** exposé en RW. Le stockage
+  interne (non-USB) ne peut être « branché » dans la VM que par ce gadget.
+- **Stockage personnel nomade** (futur, avec le sélecteur de serveur du
+  §3) : le SBC porte les fichiers/ISO de l'utilisateur → apparaissent dans
+  **n'importe quelle** VM/serveur auquel il se connecte. Le stockage suit
+  la MAC, indépendant de la cible : panel = écran + clavier (usbredir) +
+  **stockage** perso.
+- **ISO → lecteur CD USB** (`cdrom=1`, RO) : média d'install/outils monté
+  dans la VM.
+
+**Garde-fous** (cohérents avec la politique USB existante) :
+- **Jamais monté des deux côtés** : export RW seulement si le backing
+  n'est **pas monté** côté SBC (sinon corruption : deux writers) ; sinon
+  **RO**. C'est le garde-fou « jamais un fs monté » appliqué au backing.
+- `sync` + `f_mass_storage` LUN eject/détach propre avant de retirer.
+
+**Kernel SBC** : `CONFIG_USB_DUMMY_HCD` + `CONFIG_USB_CONFIGFS` +
+`USB_CONFIGFS_MASS_STORAGE`. Sur **millefeuille** = un fragment kernel à
+ajouter (comme usb-serial.fragment) ; sur Pi OS = module `dummy_hcd`.
+
+**Config** (client) : `SREMFB_USB_STORAGE=<spec>[,<spec>…]`, chaque spec
+`chemin[:ro|:rw|:cdrom]` — ex. `/dev/nvme0n1p3:rw`, `/data/backup.img:rw`,
+`/isos/tools.iso:cdrom`. Éligible seulement si non-monté (RW) ; annoncé
+par le même bit hello USB.
+
+**Perf** : bulk over usbip-TCP → dizaines de Mo/s sur gigabit (A20, Milim)
+— bon pour sauvegarde / scratch / distribution ; pas du high-IOPS (pour
+ça : NBD/virtiofs, hors chemin USB).
+
 ---
 
 ## 3. Modèle de transport unifié : (MAC, rôle, head)
@@ -276,6 +331,7 @@ mesurable (spike) si l'on voulait zéro touche protocole, mais non retenue.
 | **T2** | serveur SPICE : tableau de têtes (connexion de tous les display channels, snapshot primary par tête, invalidate/resize par tête, fan-out par tête) | serveur SPICE |
 | **U1** | usbredir : routage ip→VM, `connect_device` explicite, privilèges (A), réconciliateur bridge, garde-fous | bridge only |
 | **U2** | robustesse usbredir : hotplug, départ client, détach propre | bridge only |
+| **U3** | stockage local exporté (§2.7) : gadget `f_mass_storage`/`dummy_hcd` (fichier/blockdev/ISO, RW/RO/cdrom), garde-fous double-mount, fragment kernel millefeuille, config `SREMFB_USB_STORAGE` | client (SBC) |
 | **A1** | audio : `AUDIO_FORMAT`/`AUDIO_DATA` + 2ᵉ connexion `role=audio` (DSCP EF) | protocole |
 | **A2** | serveur : tap `SpicePlaybackChannel` → flux audio dédié | serveur SPICE |
 | **A3** | client : connexion audio + `audio.c` ALSA + annonce du bit | client |
@@ -317,6 +373,11 @@ C2 dépend de T (clé (MAC,rôle,head)) + T2 (serveur multi-têtes).
   tête d'un même SBC tuerait la 1ʳᵉ).
 - usbredir réutilise la chaîne usbip existante (pas usbredirserver direct) ;
   chaque `sremfb-spice` pilote usbredir pour SES clients (routage ip→VM).
+- Le **stockage local** (U3) passe par un gadget `f_mass_storage`/`dummy_hcd`
+  sur le SBC → même chaîne usbip→usbredir. Bulk (fiable), donc retenu là où
+  l'audio-gadget est écarté. Backing fichier/blockdev/ISO, RW seulement si
+  non-monté côté SBC. Stockage réseau (NBD/virtiofs) = hors chemin USB, pour
+  le high-IOPS uniquement.
 - L'audio a son **propre flux** (`role=audio`, DSCP EF) — condition du QoS
   et de l'anti-HoL ; feature-bit, ignoré des vieux clients. Haut-parleur
   USB virtuel écarté (§4.4).
@@ -339,3 +400,6 @@ C2 dépend de T (clé (MAC,rôle,head)) + T2 (serveur multi-têtes).
    les display channels, ou borne configurable ?
 8. Client multi-têtes (C) : une sortie sans écran branché doit-elle ouvrir
    sa connexion (tête « en attente ») ou rester dormante jusqu'au hotplug ?
+9. Stockage U3 : perf réelle bulk-over-usbip sur gigabit (A20/Milim) ?
+   hotplug (attacher/détacher un LUN à chaud), multi-LUN, éjection sûre
+   (sync + détach) — et `dummy_hcd` dispo en module sur Pi OS ?
