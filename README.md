@@ -182,6 +182,58 @@ position).
 > seconds after its creation (bounded budget; if it runs out, a session
 > re-login clears mutter).
 
+## Proxmox VE / SPICE backend
+
+A second binary, **`sremfb-spice`**, replaces the pixel source: instead of
+an EVDI monitor on a GNOME PC it mirrors a **QEMU/KVM VM** exposed over
+**SPICE** (the typical case: a Proxmox VE node, `vga: qxl`). Everything
+downstream is identical — the same non-blocking per-client queues, LZ4,
+RGB565 + dithering and adaptive H.264 — so a workshop panel can show a
+dashboard hosted in a VM with no graphical session on the host and a clean
+"no signal" when the VM stops. It has **no EVDI dependency** and runs on
+any LAN machine that can reach the VM's SPICE port.
+
+- **One process = one VM.** Run several with the systemd template:
+  `systemctl enable --now sremfb-spice@dashboard` reads
+  `/etc/sremfb-spice.d/dashboard.conf`. Every sremfb client mirrors the
+  same canvas (fan-out).
+- **Guest resolution** (`SREMFB_RESIZE`): `agent` drives the guest to the
+  client's resolution through **spice-vdagent** (install `spice-vdagent`
+  in the guest); the first client wins, the rest are scaled. `scale`
+  never touches the guest and always scales (nearest + letterbox). `off`
+  refuses a client whose geometry differs.
+- **VM stop / reboot** → panels go "no signal"; the bridge reconnects with
+  backoff and picks the stream back up when the VM returns. A guest mode
+  change (`primary-destroy`) blanks the panels until the new mode is up.
+
+VM side, on the PVE node:
+
+```sh
+qm set <vmid> --vga qxl               # qxl2/qxl3… for extra heads
+# in the guest: apt install spice-vdagent   (for SREMFB_RESIZE=agent)
+```
+
+Give the VM a **fixed SPICE port** and a password — either an explicit
+`args: -spice port=590X,addr=0.0.0.0,password=...` (check it does not
+clash with the `-spice` line `qemu-server` already generates), or set the
+password at start via QMP `set_password spice ...` in a hookscript. Then
+point an instance config at it:
+
+```sh
+sudo cp /etc/sremfb-spice.d/example.conf /etc/sremfb-spice.d/dashboard.conf
+sudo nano /etc/sremfb-spice.d/dashboard.conf   # SREMFB_SPICE_HOST/PORT/PASSWORD
+sudo systemctl enable --now sremfb-spice@dashboard
+```
+
+> **Security.** An open SPICE port is console access to the VM. Keep it on
+> a **dedicated, trusted LAN / VLAN**, never on the management network,
+> and set `SREMFB_ALLOW`. Also force `streaming-video=off` on the VM so
+> SPICE does not MJPEG-compress "video" regions (that would break the
+> pixel-exact guarantee and double-transcode against our H.264).
+
+Build/install: see [BUILD.md](BUILD.md) (needs
+`libspice-client-glib-2.0-dev`; `make spice-build`, `make install-spice`).
+
 ## Notes
 
 - Each screen's position is set **once** in Settings → Displays; GNOME

@@ -8,6 +8,10 @@ sRemFB's application protocol, shared verbatim by server and client in
 and adaptive H.264, negotiated through the hellos without a version
 bump — every old/new combination stays compatible).
 
+The protocol is independent of where the server's pixels come from: an
+EVDI virtual monitor (`sremfb-server`) or a SPICE VM (`sremfb-spice`) is
+invisible to the wire — the client sees the same stream either way.
+
 ## Transport
 
 - **TCP**, a single port (default **4629**), with several simultaneous

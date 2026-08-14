@@ -181,6 +181,62 @@ indépendante).
 > que quelques secondes après sa création (budget borné ; épuisé, une
 > reconnexion de session remet mutter d'aplomb).
 
+## Proxmox VE / backend SPICE
+
+Un second binaire, **`sremfb-spice`**, remplace la source de pixels : au
+lieu d'un moniteur EVDI sur un PC GNOME, il miroir une **VM QEMU/KVM**
+exposée en **SPICE** (cas typique : un nœud Proxmox VE, `vga: qxl`). Tout
+l'aval est identique — mêmes files non bloquantes par client, LZ4, RGB565
++ dithering et H.264 adaptatif — si bien qu'un panneau d'atelier peut
+afficher un tableau de bord hébergé dans une VM, sans session graphique
+sur l'hôte et avec un « no signal » propre quand la VM s'arrête. Il n'a
+**aucune dépendance EVDI** et tourne sur n'importe quelle machine du LAN
+capable d'atteindre le port SPICE de la VM.
+
+- **1 process = 1 VM.** On en lance plusieurs via le template systemd :
+  `systemctl enable --now sremfb-spice@dashboard` lit
+  `/etc/sremfb-spice.d/dashboard.conf`. Tous les clients sremfb sont
+  miroir du même canvas (fan-out).
+- **Résolution invitée** (`SREMFB_RESIZE`) : `agent` pilote la résolution
+  de l'invité vers celle du client via **spice-vdagent** (installer
+  `spice-vdagent` dans l'invité) ; le premier client gagne, les autres
+  sont scalés. `scale` ne touche jamais l'invité et scale toujours
+  (nearest + letterbox). `off` refuse un client dont la géométrie diffère.
+- **Arrêt / reboot de la VM** → les panneaux passent « no signal » ; le
+  pont se reconnecte avec backoff et reprend le flux au retour de la VM.
+  Un changement de mode invité (`primary-destroy`) blanke les panneaux
+  jusqu'au nouveau mode.
+
+Côté VM, sur le nœud PVE :
+
+```sh
+qm set <vmid> --vga qxl               # qxl2/qxl3… pour plusieurs têtes
+# dans l'invité : apt install spice-vdagent   (pour SREMFB_RESIZE=agent)
+```
+
+Donner à la VM un **port SPICE fixe** et un mot de passe — soit un
+`args: -spice port=590X,addr=0.0.0.0,password=...` explicite (vérifier
+qu'il n'entre pas en conflit avec la ligne `-spice` déjà générée par
+`qemu-server`), soit poser le mot de passe au démarrage via QMP
+`set_password spice ...` dans un hookscript. Puis pointer une instance
+dessus :
+
+```sh
+sudo cp /etc/sremfb-spice.d/example.conf /etc/sremfb-spice.d/dashboard.conf
+sudo nano /etc/sremfb-spice.d/dashboard.conf   # SREMFB_SPICE_HOST/PORT/PASSWORD
+sudo systemctl enable --now sremfb-spice@dashboard
+```
+
+> **Sécurité.** Un port SPICE ouvert = accès console à la VM. Le garder
+> sur un **LAN/VLAN dédié et de confiance**, jamais sur le réseau de
+> management, et régler `SREMFB_ALLOW`. Forcer aussi `streaming-video=off`
+> sur la VM pour que SPICE ne compresse pas en MJPEG les zones « vidéo »
+> (cela casserait la garantie pixel-exact et ferait double transcodage
+> avec notre H.264).
+
+Build/install : voir [BUILD.fr.md](BUILD.fr.md) (nécessite
+`libspice-client-glib-2.0-dev` ; `make spice-build`, `make install-spice`).
+
 ## Notes
 
 - La position de chaque écran se règle **une seule fois** dans Réglages →

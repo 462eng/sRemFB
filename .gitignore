@@ -1,5 +1,6 @@
 *.o
 server/sremfb-server
+server/sremfb-spice
 client/sremfb-client
 sremfb-test-*.ppm
 dist/

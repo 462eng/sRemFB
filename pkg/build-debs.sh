@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.3.1}
+VERSION=${1:-1.4.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -39,6 +39,16 @@ fetch_lz4 armhf
 # --- binaires -----------------------------------------------------------
 echo "== build serveur (amd64)"
 make -s -C "$TOP/server"
+
+# Le pont SPICE n'est empaqueté que si ses dépendances de build sont là
+# (libspice-client-glib-2.0-dev) — sinon on saute simplement ce paquet.
+if pkg-config --exists spice-client-glib-2.0 2>/dev/null; then
+    echo "== build pont SPICE (amd64)"
+    make -s -C "$TOP/server" sremfb-spice
+    BUILD_SPICE=1
+else
+    echo "== SPICE ignoré (libspice-client-glib-2.0-dev absent)"
+fi
 
 build_client() { # $1 = debian arch, $2 = triplet gcc
     echo "== build client ($1)"
@@ -150,6 +160,43 @@ Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
  congestion par le délai et bascule en H.264 (x264) les clients qui
  savent le décoder quand le lien sature. Attache par usbip les
  périphériques USB que les clients exportent (téléport USB)."
+
+# ---- sremfb-spice (amd64) ----
+if [ "$BUILD_SPICE" ]; then
+ROOT=$STAGE/spice
+mkdir -p "$ROOT/usr/bin" "$ROOT/usr/lib/systemd/system" \
+         "$ROOT/etc/sremfb-spice.d"
+install -m 755 "$TOP/server/sremfb-spice" "$ROOT/usr/bin/sremfb-spice"
+strip "$ROOT/usr/bin/sremfb-spice"
+sed 's|/usr/local/bin|/usr/bin|' "$TOP/systemd/sremfb-spice@.service" \
+    > "$ROOT/usr/lib/systemd/system/sremfb-spice@.service"
+install -m 600 "$TOP/systemd/sremfb-spice.conf.example" \
+    "$ROOT/etc/sremfb-spice.d/example.conf"
+mkdir -p "$ROOT/DEBIAN"
+printf '/etc/sremfb-spice.d/example.conf\n' > "$ROOT/DEBIAN/conffiles"
+cat > "$ROOT/DEBIAN/postinst" <<'EOF'
+#!/bin/sh -e
+systemctl daemon-reload 2>/dev/null || true
+echo "sremfb-spice : copier /etc/sremfb-spice.d/example.conf vers <vm>.conf,"
+echo "  renseigner SREMFB_SPICE_HOST/PORT, puis :"
+echo "  systemctl enable --now sremfb-spice@<vm>"
+EOF
+chmod 755 "$ROOT/DEBIAN/postinst"
+cat > "$ROOT/DEBIAN/postrm" <<'EOF'
+#!/bin/sh -e
+[ "$1" = remove ] || [ "$1" = purge ] || exit 0
+systemctl daemon-reload 2>/dev/null || true
+EOF
+chmod 755 "$ROOT/DEBIAN/postrm"
+make_deb sremfb-spice amd64 \
+"Depends: libglib2.0-0t64, liblz4-1, libx264-164, libspice-client-glib-2.0-8
+Description: sRemFB, écran virtuel réseau — pont SPICE (VM QEMU/KVM)
+ Miroir d'une VM QEMU/KVM (affichage qxl exposé en SPICE, p.ex. Proxmox
+ VE) vers les sremfb-client du LAN : client spice-client-glib d'un côté,
+ serveur sRemFB de l'autre (mêmes files non bloquantes par client, LZ4 et
+ H.264 adaptatif que sremfb-server). Une instance systemd par VM. Ne
+ dépend pas d'EVDI, tourne sur n'importe quelle machine du LAN."
+fi
 
 # ---- sremfb-client (arm64 + armhf) ----
 for arch in arm64 armhf; do

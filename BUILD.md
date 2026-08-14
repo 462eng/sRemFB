@@ -30,6 +30,22 @@ sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
 
 Tested with libevdi/evdi-dkms **1.14.8** (Debian trixie).
 
+### SPICE bridge (optional, `sremfb-spice`)
+
+The SPICE bridge mirrors a QEMU/KVM VM instead of an EVDI monitor. It is a
+**separate binary** with no EVDI dependency — it runs on any LAN machine
+(a Proxmox VE node, or any host that can reach the VM's SPICE port).
+
+```sh
+sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
+                 libspice-client-glib-2.0-dev
+```
+
+- `libspice-client-glib-2.0` — the SPICE client library (GObject/GLib).
+- `glib`, `liblz4`, `libx264` — same core as the server; **no** libevdi.
+
+Tested with libspice-client-glib **0.42** (Debian trixie).
+
 ### Client (SBC)
 
 Only build dependency: `liblz4-dev`.
@@ -49,10 +65,13 @@ and Armbian.
 make                 # server/sremfb-server + client/sremfb-client
 make -C server       # server only
 make -C client       # client only
+make spice-build     # server/sremfb-spice (needs the SPICE dev package)
 make clean
 ```
 
-Default flags: `-O2 -g -Wall -Wextra`. Override via `CFLAGS`.
+Default flags: `-O2 -g -Wall -Wextra`. Override via `CFLAGS`. `sremfb-spice`
+is not part of the default `make`: it is built on demand so the EVDI PC
+does not need the SPICE headers.
 
 ## Local install (no package)
 
@@ -95,8 +114,23 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sremfb-client
 ```
 
-`PREFIX` (default `/usr/local`) and `DESTDIR` are honored by both install
+`PREFIX` (default `/usr/local`) and `DESTDIR` are honored by all install
 targets.
+
+### SPICE bridge (on a bridge host / PVE node, as root)
+
+```sh
+sudo make install-spice
+sudo cp /etc/sremfb-spice.d/example.conf /etc/sremfb-spice.d/dashboard.conf
+sudo nano /etc/sremfb-spice.d/dashboard.conf   # SREMFB_SPICE_HOST/PORT…
+sudo systemctl enable --now sremfb-spice@dashboard
+```
+
+Installs the binary into `/usr/local/bin/`, the **system** template unit
+`sremfb-spice@.service` into `/etc/systemd/system/`, and an example
+instance config into `/etc/sremfb-spice.d/`. One instance = one VM; the
+unit name after `@` selects `/etc/sremfb-spice.d/<name>.conf`. See
+[README.md](README.md), "Proxmox VE / SPICE backend".
 
 ## Debian packages
 
@@ -104,12 +138,13 @@ targets.
 
 | Package | Arch | Target |
 |---|---|---|
-| `sremfb-server` | amd64 | GNOME/Wayland PC |
+| `sremfb-server` | amd64 | GNOME/Wayland PC (EVDI) |
+| `sremfb-spice` | amd64 | bridge host / PVE node (SPICE) — only when `libspice-client-glib-2.0-dev` is installed |
 | `sremfb-client` | arm64 | 64-bit SBC (Pi 3/4/5/500, etc.) |
 | `sremfb-client` | armhf | ARMv7 SBC (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.3.1 by default
+./pkg/build-debs.sh              # version 1.4.0 by default
 ./pkg/build-debs.sh 3.1.0        # explicit version
 ```
 
@@ -148,9 +183,9 @@ override it with the `MAINT` environment variable
 
 ```sh
 # server
-sudo apt install ./dist/sremfb-server_1.3.1_amd64.deb
+sudo apt install ./dist/sremfb-server_1.4.0_amd64.deb
 # client (on the SBC)
-sudo apt install ./dist/sremfb-client_1.3.1_arm64.deb
+sudo apt install ./dist/sremfb-client_1.4.0_arm64.deb
 ```
 
 On an already-modified config, `dpkg -i --force-confold` keeps the

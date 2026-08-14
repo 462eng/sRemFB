@@ -1,0 +1,19 @@
+[Unit]
+Description=sRemFB SPICE bridge — %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# One instance per VM: /etc/sremfb-spice.d/<name>.conf carries
+# SREMFB_SPICE_HOST/PORT/PASSWORD… (keep it 0600, it may hold a password;
+# systemd reads it as root before dropping to the transient user).
+EnvironmentFile=/etc/sremfb-spice.d/%i.conf
+ExecStart=/usr/local/bin/sremfb-spice
+Restart=always
+RestartSec=2
+# The bridge only needs outbound TCP (SPICE) + one listening port: no
+# device or filesystem access, so run it fully unprivileged and isolated.
+DynamicUser=yes
+
+[Install]
+WantedBy=multi-user.target

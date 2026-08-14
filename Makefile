@@ -5,6 +5,11 @@ all: server-build client-build
 server-build:
 	$(MAKE) -C server
 
+# SPICE bridge binary — needs libspice-client-glib-2.0-dev, built on
+# demand (bridge/PVE hosts), not part of the default 'all'.
+spice-build:
+	$(MAKE) -C server sremfb-spice
+
 client-build:
 	$(MAKE) -C client
 
@@ -51,6 +56,20 @@ install-server: server-build
 	@echo "Enable with: systemctl --user daemon-reload && systemctl --user enable --now sremfb-server"
 	@echo "First time only: modprobe evdi   (loaded automatically from the next boot)"
 
+# On a bridge host / Proxmox VE node (run as root). No EVDI, no graphical
+# session: a system template unit, one instance per VM.
+install-spice: spice-build
+	install -D -m 755 server/sremfb-spice $(DESTDIR)$(PREFIX)/bin/sremfb-spice
+	install -D -m 644 systemd/sremfb-spice@.service \
+		$(DESTDIR)/etc/systemd/system/sremfb-spice@.service
+	install -d -m 755 $(DESTDIR)/etc/sremfb-spice.d
+	@test -f $(DESTDIR)/etc/sremfb-spice.d/example.conf || \
+		install -D -m 600 systemd/sremfb-spice.conf.example \
+			$(DESTDIR)/etc/sremfb-spice.d/example.conf
+	-systemctl daemon-reload
+	@echo "Copy /etc/sremfb-spice.d/example.conf to <vm>.conf, edit it, then:"
+	@echo "  systemctl enable --now sremfb-spice@<vm>"
+
 # On the SBC (run as root)
 install-client: client-build
 	install -D -m 755 client/sremfb-client $(DESTDIR)$(PREFIX)/bin/sremfb-client
@@ -60,4 +79,5 @@ install-client: client-build
 		install -D -m 644 systemd/sremfb.conf.example $(DESTDIR)/etc/sremfb.conf
 	@echo "Edit /etc/sremfb.conf, then: systemctl daemon-reload && systemctl enable --now sremfb-client"
 
-.PHONY: all server-build client-build clean install-server install-client
+.PHONY: all server-build spice-build client-build clean \
+        install-server install-spice install-client

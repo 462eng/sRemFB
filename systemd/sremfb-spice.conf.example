@@ -1,0 +1,35 @@
+# sRemFB SPICE bridge instance — /etc/sremfb-spice.d/<name>.conf
+#
+# One file per VM. Copy this to e.g. /etc/sremfb-spice.d/dashboard.conf,
+# fill in the SPICE endpoint, then:
+#     systemctl enable --now sremfb-spice@dashboard
+# Keep the file 0600 if SREMFB_SPICE_PASSWORD is set.
+
+# --- SPICE endpoint (the VM), required ---------------------------------
+SREMFB_SPICE_HOST=192.0.2.10
+SREMFB_SPICE_PORT=5900
+# Static SPICE password (QEMU set_password / -spice password=…).
+# SREMFB_SPICE_PASSWORD=secret
+# TLS instead of plain (tls-port + CA). On Proxmox the CA is
+# /etc/pve/pve-root-ca.pem.
+# SREMFB_SPICE_TLS=1
+# SREMFB_SPICE_CA_FILE=/etc/pve/pve-root-ca.pem
+# Which SPICE display head to mirror (qxl2/qxl3 give more). Default 0.
+# SREMFB_SPICE_DISPLAY=0
+
+# --- Guest resolution handling -----------------------------------------
+# agent = drive the guest resolution to the client's via spice-vdagent
+#         (needs spice-vdagent in the guest); the first client wins, the
+#         rest are scaled.
+# scale = never touch the guest, always scale (nearest + letterbox).
+# off   = refuse a client whose geometry differs (BAD_HELLO).
+# SREMFB_RESIZE=agent
+
+# --- sRemFB side (same knobs as sremfb-server) -------------------------
+# IPv4 ranges allowed to connect. Unset = everyone (trusted LAN only!).
+# The SPICE port is console access to the VM: use a dedicated/trusted LAN.
+SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
+# SREMFB_PORT=4629
+# Adaptive H.264 A/B switches:
+# SREMFB_NO_H264=1
+# SREMFB_FORCE_H264=1

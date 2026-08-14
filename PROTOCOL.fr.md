@@ -8,6 +8,10 @@ client dans [`protocol.h`](protocol.h). Version décrite ici : **v2**
 délai et H.264 adaptatif, négociés par les hellos sans changer de
 version — toutes les combinaisons ancien/nouveau restent compatibles).
 
+Le protocole est indépendant de l'origine des pixels du serveur : que ce
+soit un moniteur virtuel EVDI (`sremfb-server`) ou une VM SPICE
+(`sremfb-spice`), le fil est identique — le client voit le même flux.
+
 ## Transport
 
 - **TCP**, un port unique (défaut **4629**), plusieurs clients simultanés
