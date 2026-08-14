@@ -2,6 +2,10 @@
 Description=sRemFB virtual display server
 PartOf=graphical-session.target
 After=graphical-session.target
+# Backstop against a restart loop: the server already waits in-process for
+# evdi at cold boot, but if it exits for any other reason, don't spin.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Environment=SREMFB_PORT=4629
