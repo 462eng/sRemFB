@@ -84,15 +84,13 @@
 
 #include "protocol.h"
 #include "v4l2dec.h"
+#include "output.h"
 
 volatile sig_atomic_t g_stop = 0;      /* shared with v4l2dec.c */
 
 static struct {
     const char *server;
     const char *port;
-    const char *fbdev;
-    const char *tty;
-    int use_pwrite;
     int no_lz4;
     int no_h264;
     int usb_active;            /* usbexport.c bound our USB devices */
@@ -106,26 +104,18 @@ static struct {
     int dec_open;              /* decoder initialized this session */
     int h264_broken;           /* runtime failure: stop advertising */
     uint8_t srv_flags;         /* from the server hello */
-    uint8_t *rowbuf;           /* one converted row (YUV -> fb format) */
+    uint8_t *rowbuf;           /* one converted row (YUV -> panel format) */
 
     /* panel hotplug watcher */
     int hotplug_armed;         /* a connected DRM connector existed at start */
 
-    /* framebuffer state */
-    int fb_fd;
-    uint8_t *fbmem;            /* NULL in pwrite/test mode */
-    size_t fb_size;
-    struct fb_var_screeninfo vinfo;
-    struct fb_fix_screeninfo finfo;
+    /* output sink (fb default, drm opt-in) + panel format it wants */
+    struct sremfb_output out;
     uint8_t pixfmt;
     unsigned bytespp;
-    int blanked;               /* panel currently blanked (FBIOBLANK) */
+    int blanked;               /* panel currently blanked (logical state) */
 
-    /* console state */
-    int tty_fd;
-    int tty_restore_needed;
-
-    /* negotiated stream geometry and its placement in the fb (centered) */
+    /* negotiated stream geometry and its placement in the panel (centered) */
     unsigned stream_w, stream_h;
     int off_x, off_y;
 
@@ -192,79 +182,13 @@ static int writen(int fd, const void *buf, size_t len)
     return 0;
 }
 
-/* ------------------------------------------------------ framebuffer */
-
-static int fb_open(void)
-{
-    C.fb_fd = open(C.fbdev, O_RDWR);
-    if (C.fb_fd < 0) {
-        logmsg("cannot open %s: %s", C.fbdev, strerror(errno));
-        return -1;
-    }
-    if (ioctl(C.fb_fd, FBIOGET_VSCREENINFO, &C.vinfo) < 0 ||
-        ioctl(C.fb_fd, FBIOGET_FSCREENINFO, &C.finfo) < 0) {
-        logmsg("FBIOGET_*SCREENINFO failed on %s: %s", C.fbdev, strerror(errno));
-        return -1;
-    }
-
-    if (C.vinfo.bits_per_pixel == 32 && C.vinfo.red.offset == 16 &&
-        C.vinfo.green.offset == 8 && C.vinfo.blue.offset == 0) {
-        C.pixfmt = SREMFB_PIX_XRGB8888;
-        C.bytespp = 4;
-    } else if (C.vinfo.bits_per_pixel == 16 && C.vinfo.red.offset == 11 &&
-               C.vinfo.green.offset == 5 && C.vinfo.blue.offset == 0) {
-        C.pixfmt = SREMFB_PIX_RGB565;
-        C.bytespp = 2;
-    } else {
-        logmsg("unsupported fb format: %ubpp r@%u/%u g@%u/%u b@%u/%u "
-               "(need 32bpp XRGB8888 or 16bpp RGB565)",
-               C.vinfo.bits_per_pixel,
-               C.vinfo.red.offset, C.vinfo.red.length,
-               C.vinfo.green.offset, C.vinfo.green.length,
-               C.vinfo.blue.offset, C.vinfo.blue.length);
-        return -1;
-    }
-
-    logmsg("%s: %ux%u %ubpp (%s), stride %u",
-           C.fbdev, C.vinfo.xres, C.vinfo.yres, C.vinfo.bits_per_pixel,
-           C.pixfmt == SREMFB_PIX_XRGB8888 ? "XRGB8888" : "RGB565",
-           C.finfo.line_length);
-
-    if (!C.use_pwrite) {
-        C.fb_size = C.finfo.smem_len;
-        C.fbmem = mmap(NULL, C.fb_size, PROT_READ | PROT_WRITE,
-                       MAP_SHARED, C.fb_fd, 0);
-        if (C.fbmem == MAP_FAILED) {
-            logmsg("mmap failed (%s), falling back to pwrite mode",
-                   strerror(errno));
-            C.fbmem = NULL;
-            C.use_pwrite = 1;
-        }
-    }
-    return 0;
-}
-
-static void fb_clear(void)
-{
-    if (C.fbmem) {
-        memset(C.fbmem, 0, C.fb_size);
-    } else if (C.fb_fd >= 0) {
-        uint8_t zeros[4096] = {0};
-        off_t total = (off_t)C.finfo.line_length * C.vinfo.yres;
-        for (off_t off = 0; off < total; off += (off_t)sizeof(zeros)) {
-            size_t n = sizeof(zeros);
-            if (off + (off_t)n > total)
-                n = (size_t)(total - off);
-            if (pwrite(C.fb_fd, zeros, n, off) < 0)
-                break;
-        }
-    }
-}
+/* ------------------------------------------------------ output sink */
 
 /* Panel power: blanked while there is no server (no signal) and when the
- * server forwards a DPMS off. Falls back to painting black if the fbdev
- * driver cannot power the panel down. */
-static void fb_set_blank(int on)
+ * server forwards a DPMS off. The output backend does the real work
+ * (FBIOBLANK / DPMS); here we keep the logical state and the test-mode
+ * shortcut. */
+static void set_blank(int on)
 {
     on = !!on;
     if (on == C.blanked)
@@ -274,20 +198,17 @@ static void fb_set_blank(int on)
         logmsg("panel %s", on ? "blanked" : "unblanked");
         return;
     }
-    if (C.fb_fd >= 0 &&
-        ioctl(C.fb_fd, FBIOBLANK,
-              on ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK) == 0)
-        return;
-    if (on)
-        fb_clear();
+    C.out.ops->blank(&C.out, on);
 }
 
-/* Blit one row of stream pixels into the fb, clipping to the visible area.
- * sx,sy are stream coordinates; row is w pixels of C.bytespp bytes. */
-static void fb_blit_row(unsigned sx, unsigned sy, unsigned w, const uint8_t *row)
+/* Blit one row of stream pixels into the panel, centering the stream and
+ * clipping to the visible area. sx,sy are stream coordinates; row is w
+ * pixels of C.bytespp bytes. */
+static void blit_stream_row(unsigned sx, unsigned sy, unsigned w,
+                            const uint8_t *row)
 {
     int dy = (int)sy + C.off_y;
-    if (dy < 0 || dy >= (int)C.vinfo.yres)
+    if (dy < 0 || dy >= (int)C.out.h)
         return;
 
     int dx = (int)sx + C.off_x;
@@ -299,74 +220,27 @@ static void fb_blit_row(unsigned sx, unsigned sy, unsigned w, const uint8_t *row
         dx = 0;
         w -= skip;
     }
-    if ((unsigned)dx >= C.vinfo.xres)
+    if ((unsigned)dx >= C.out.w)
         return;
-    if ((unsigned)dx + w > C.vinfo.xres)
-        w = C.vinfo.xres - (unsigned)dx;
+    if ((unsigned)dx + w > C.out.w)
+        w = C.out.w - (unsigned)dx;
 
-    off_t off = (off_t)dy * C.finfo.line_length + (off_t)dx * C.bytespp;
-    const uint8_t *src = row + (size_t)skip * C.bytespp;
-    size_t len = (size_t)w * C.bytespp;
-
-    if (C.fbmem)
-        memcpy(C.fbmem + off, src, len);
-    else
-        pwrite(C.fb_fd, src, len, off);
+    C.out.ops->write_row(&C.out, (unsigned)dx, (unsigned)dy,
+                         row + (size_t)skip * C.bytespp, w);
 }
 
-/* ---------------------------------------------------------- console */
-
-/* Extract the VT number from a /dev/ttyN path (e.g. "/dev/tty7" -> 7). */
-static int vt_of(const char *tty)
+/* Publish the frame just written (page-flip on drm, no-op on fb). */
+static void out_present(void)
 {
-    const char *e = tty + strlen(tty);
-    while (e > tty && e[-1] >= '0' && e[-1] <= '9')
-        e--;
-    return *e ? atoi(e) : -1;
+    if (!C.test_mode && C.out.ops->present)
+        C.out.ops->present(&C.out);
 }
 
-static void console_restore(void)
+/* Restore the console on any exit (safety net for the VT grab). */
+static void out_ungrab_atexit(void)
 {
-    if (C.tty_restore_needed && C.tty_fd >= 0) {
-        ioctl(C.tty_fd, KDSETMODE, KD_TEXT);
-        ioctl(C.tty_fd, VT_ACTIVATE, 1);   /* hand a login console back */
-        C.tty_restore_needed = 0;
-    }
-}
-
-static void console_grab(void)
-{
-    C.tty_fd = open(C.tty, O_RDWR);
-    if (C.tty_fd < 0) {
-        logmsg("cannot open %s (%s); trying fbcon fallback", C.tty,
-               strerror(errno));
-        int fd = open("/sys/class/graphics/fbcon/cursor_blink", O_WRONLY);
-        if (fd >= 0) {
-            if (write(fd, "0", 1) < 0)
-                logmsg("could not disable fbcon cursor blink");
-            close(fd);
-        }
-        return;
-    }
-    if (ioctl(C.tty_fd, KDSETMODE, KD_GRAPHICS) == 0) {
-        C.tty_restore_needed = 1;
-    } else {
-        logmsg("KDSETMODE KD_GRAPHICS failed on %s: %s (console may show "
-               "through)", C.tty, strerror(errno));
-        /* best effort: kill blanking + cursor via escape sequences */
-        const char esc[] = "\033[9;0]\033[?25l";
-        if (write(C.tty_fd, esc, sizeof(esc) - 1) < 0)
-            logmsg("could not write console escape sequences");
-    }
-    /* Bring our VT to the foreground: KD_GRAPHICS only silences fbcon on the
-     * *active* VT, so if we booted onto another VT (e.g. a getty on tty1/2)
-     * its blinking cursor keeps being drawn on the framebuffer. Use a VT with
-     * no getty (beyond logind's NAutoVTs, e.g. tty7). */
-    int vt = vt_of(C.tty);
-    if (vt > 0 && (ioctl(C.tty_fd, VT_ACTIVATE, vt) < 0 ||
-                   ioctl(C.tty_fd, VT_WAITACTIVE, vt) < 0))
-        logmsg("could not switch to VT %d (%s): console may show through",
-               vt, strerror(errno));
+    if (C.out.ops)
+        C.out.ops->ungrab(&C.out);
 }
 
 /* -------------------------------------------------------------- mac */
@@ -446,39 +320,12 @@ static void discover_mac(int sock, uint8_t mac[6])
     close(s);
 }
 
-/* ------------------------------------------------------ panel watch */
-
-/* Is any DRM connector "connected"? 1 = yes, 0 = no (panel unplugged),
- * -1 = no DRM at all (watcher stays disabled). "unknown" statuses are
- * ignored — only an explicit "disconnected" everywhere counts as gone. */
+/* Is the panel connected? Delegates to the output backend (DRM connector
+ * scan for fb, KMS status for drm). 1 = yes, 0 = unplugged, -1 = no
+ * watcher. */
 static int panel_present(void)
 {
-    DIR *dir = opendir("/sys/class/drm");
-    struct dirent *de;
-    int have_conn = 0, connected = 0;
-
-    if (!dir)
-        return -1;
-    while ((de = readdir(dir))) {
-        char path[512], status[16] = "";
-        if (strncmp(de->d_name, "card", 4) != 0 || !strchr(de->d_name, '-'))
-            continue;
-        snprintf(path, sizeof(path), "/sys/class/drm/%s/status", de->d_name);
-        FILE *f = fopen(path, "r");
-        if (!f)
-            continue;
-        if (!fgets(status, sizeof(status), f))
-            status[0] = '\0';
-        fclose(f);
-        have_conn = 1;
-        if (strncmp(status, "connected", 9) == 0 ||
-            strncmp(status, "unknown", 7) == 0)
-            connected = 1;
-    }
-    closedir(dir);
-    if (!have_conn)
-        return -1;
-    return connected;
+    return C.out.ops->panel_present(&C.out);
 }
 
 /* ---------------------------------------------------- decoded frames */
@@ -519,7 +366,7 @@ static void frame_to_fb(const struct v4l2dec_frame *f)
 
     if (f->fourcc == V4L2_PIX_FMT_RGB565 && C.bytespp == 2) {
         for (unsigned y = 0; y < h; y++)
-            fb_blit_row(0, y, w, f->data + (size_t)y * f->stride);
+            blit_stream_row(0, y, w, f->data + (size_t)y * f->stride);
     } else if (C.rowbuf) {
         const uint8_t *luma = f->data;
         const uint8_t *chroma = f->data + (size_t)f->stride * f->coded_h;
@@ -540,11 +387,11 @@ static void frame_to_fb(const struct v4l2dec_frame *f)
             }
             yuv_row_to_fb(C.rowbuf, luma + (size_t)y * f->stride, u, v,
                           step, w);
-            fb_blit_row(0, y, w, C.rowbuf);
+            blit_stream_row(0, y, w, C.rowbuf);
         }
     }
-    if (C.blanked)
-        fb_set_blank(0);
+    out_present();
+    set_blank(0);
 }
 
 /*
@@ -817,16 +664,19 @@ static int hello_exchange(int fd)
         ch.green_off = 8; ch.green_len = 8;
         ch.blue_off = 0;  ch.blue_len = 8;
     } else {
-        ch.xres = (uint16_t)C.vinfo.xres;
-        ch.yres = (uint16_t)C.vinfo.yres;
-        ch.bpp = (uint8_t)C.vinfo.bits_per_pixel;
+        ch.xres = (uint16_t)C.out.w;
+        ch.yres = (uint16_t)C.out.h;
+        ch.bpp = (uint8_t)(C.bytespp * 8);
         ch.pixfmt = C.pixfmt;
-        ch.red_off = (uint8_t)C.vinfo.red.offset;
-        ch.red_len = (uint8_t)C.vinfo.red.length;
-        ch.green_off = (uint8_t)C.vinfo.green.offset;
-        ch.green_len = (uint8_t)C.vinfo.green.length;
-        ch.blue_off = (uint8_t)C.vinfo.blue.offset;
-        ch.blue_len = (uint8_t)C.vinfo.blue.length;
+        if (C.pixfmt == SREMFB_PIX_RGB565) {
+            ch.red_off = 11; ch.red_len = 5;
+            ch.green_off = 5; ch.green_len = 6;
+            ch.blue_off = 0;  ch.blue_len = 5;
+        } else {
+            ch.red_off = 16; ch.red_len = 8;
+            ch.green_off = 8; ch.green_len = 8;
+            ch.blue_off = 0;  ch.blue_len = 8;
+        }
     }
 
     if (writen(fd, &ch, sizeof(ch)) < 0) {
@@ -869,11 +719,11 @@ static int hello_exchange(int fd)
             return -1;
         }
     } else {
-        C.off_x = ((int)C.vinfo.xres - (int)C.stream_w) / 2;
-        C.off_y = ((int)C.vinfo.yres - (int)C.stream_h) / 2;
-        if (C.stream_w != C.vinfo.xres || C.stream_h != C.vinfo.yres)
-            logmsg("stream %ux%u != fb %ux%u, centering",
-                   C.stream_w, C.stream_h, C.vinfo.xres, C.vinfo.yres);
+        C.off_x = ((int)C.out.w - (int)C.stream_w) / 2;
+        C.off_y = ((int)C.out.h - (int)C.stream_h) / 2;
+        if (C.stream_w != C.out.w || C.stream_h != C.out.h)
+            logmsg("stream %ux%u != panel %ux%u, centering",
+                   C.stream_w, C.stream_h, C.out.w, C.out.h);
     }
     logmsg("connected: stream %ux%u (mac %02x:%02x:%02x:%02x:%02x:%02x)",
            C.stream_w, C.stream_h, ch.mac[0], ch.mac[1], ch.mac[2],
@@ -887,7 +737,7 @@ static void emit_row(unsigned sx, unsigned sy, unsigned w, const uint8_t *row)
         size_t off = ((size_t)sy * C.stream_w + sx) * 4;
         memcpy(C.testbuf + off, row, (size_t)w * 4);
     } else {
-        fb_blit_row(sx, sy, w, row);
+        blit_stream_row(sx, sy, w, row);
     }
 }
 
@@ -1006,7 +856,7 @@ static void frame_loop(int fd)
                 logmsg("bad control message payload len %u", hdr.payload_len);
                 break;
             }
-            fb_set_blank(hdr.encoding == SREMFB_ENC_BLANK);
+            set_blank(hdr.encoding == SREMFB_ENC_BLANK);
             continue;
         }
 
@@ -1111,9 +961,9 @@ static void frame_loop(int fd)
             break;
         }
 
-        /* pixels on screen: make sure the panel shows them */
-        if (C.blanked)
-            fb_set_blank(0);
+        /* pixels on screen: publish them and make sure the panel is on */
+        out_present();
+        set_blank(0);
 
         if (C.test_mode) {
             if (C.frame_count % 30 == 0)
@@ -1155,8 +1005,9 @@ static int decode_test(const char *path)
         logmsg("no V4L2 H.264 decoder on this machine");
         goto out;
     }
-    C.stream_w = C.vinfo.xres;
-    C.stream_h = C.vinfo.yres;
+    C.stream_w = C.out.w;
+    C.stream_h = C.out.h;
+    C.off_x = C.off_y = 0;
     C.rowbuf = malloc((size_t)C.stream_w * C.bytespp);
 
     while (!g_stop && fread(&l32, 4, 1, fl) == 1) {
@@ -1169,7 +1020,7 @@ static int decode_test(const char *path)
             goto out;
         }
         if (first) {
-            if (v4l2dec_open(C.vinfo.xres, C.vinfo.yres,
+            if (v4l2dec_open(C.out.w, C.out.h,
                              C.pixfmt == SREMFB_PIX_RGB565) < 0)
                 goto out;
             first = 0;
@@ -1213,16 +1064,11 @@ int main(int argc, char **argv)
 {
     const char *env;
 
-    C.fb_fd = -1;
-    C.tty_fd = -1;
     C.server = getenv("SREMFB_SERVER");
     C.port = (env = getenv("SREMFB_PORT")) ? env : NULL;
-    C.fbdev = (env = getenv("SREMFB_FBDEV")) ? env : "/dev/fb0";
-    C.tty = (env = getenv("SREMFB_TTY")) ? env : "/dev/tty1";
-    env = getenv("SREMFB_WRITE_MODE");
-    C.use_pwrite = env && strcmp(env, "pwrite") == 0;
     C.no_lz4 = getenv("SREMFB_NO_LZ4") != NULL;
     C.no_h264 = getenv("SREMFB_NO_H264") != NULL;
+    C.out.ops = &sremfb_output_fb;      /* SREMFB_OUTPUT=drm added in C1.2 */
 
     const char *dectest = NULL;
     int usb_mode = -1;                  /* -1 auto, 0 off, 1 on */
@@ -1266,18 +1112,20 @@ int main(int argc, char **argv)
     signal(SIGPIPE, SIG_IGN);
 
     if (dectest) {
-        if (fb_open() < 0)
+        unsigned w, h;
+        if (C.out.ops->open(&C.out, &w, &h, &C.pixfmt, &C.bytespp) < 0)
             return 1;
         return decode_test(dectest) ? 1 : 0;
     }
 
     if (!C.test_mode) {
-        if (fb_open() < 0)
+        unsigned w, h;
+        if (C.out.ops->open(&C.out, &w, &h, &C.pixfmt, &C.bytespp) < 0)
             return 1;
-        console_grab();
-        atexit(console_restore);
-        fb_clear();
-        fb_set_blank(1);                /* no signal yet */
+        C.out.ops->grab(&C.out);
+        atexit(out_ungrab_atexit);
+        C.out.ops->clear(&C.out);
+        set_blank(1);                   /* no signal yet */
 
         if (!C.no_h264)
             C.dec_found = v4l2dec_probe();
@@ -1327,7 +1175,7 @@ int main(int argc, char **argv)
         }
         close(fd);
         if (!C.test_mode)
-            fb_set_blank(1);            /* no signal: panel off */
+            set_blank(1);               /* no signal: panel off */
         if (!g_stop)
             sleep(backoff);
     }
@@ -1335,16 +1183,11 @@ int main(int argc, char **argv)
     logmsg("exiting");
     usb_export_stop();                  /* give the USB devices back */
     if (!C.test_mode) {
-        fb_set_blank(0);                /* leave a usable console behind */
-        fb_clear();
-        console_restore();
+        set_blank(0);                   /* leave a usable console behind */
+        C.out.ops->clear(&C.out);
+        C.out.ops->ungrab(&C.out);
+        C.out.ops->close(&C.out);
     }
-    if (C.fbmem)
-        munmap(C.fbmem, C.fb_size);
-    if (C.fb_fd >= 0)
-        close(C.fb_fd);
-    if (C.tty_fd >= 0)
-        close(C.tty_fd);
     free(C.testbuf);
     free(C.rowbuf);
     return 0;
