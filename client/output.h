@@ -64,6 +64,6 @@ struct sremfb_output {
 
 /* Selected by SREMFB_OUTPUT (fb default; drm opt-in, forced if multi-head). */
 extern const struct sremfb_output_ops sremfb_output_fb;
-/* extern const struct sremfb_output_ops sremfb_output_drm;   (C1.2) */
+extern const struct sremfb_output_ops sremfb_output_drm;
 
 #endif /* SREMFB_OUTPUT_H */

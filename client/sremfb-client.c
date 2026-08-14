@@ -1068,7 +1068,9 @@ int main(int argc, char **argv)
     C.port = (env = getenv("SREMFB_PORT")) ? env : NULL;
     C.no_lz4 = getenv("SREMFB_NO_LZ4") != NULL;
     C.no_h264 = getenv("SREMFB_NO_H264") != NULL;
-    C.out.ops = &sremfb_output_fb;      /* SREMFB_OUTPUT=drm added in C1.2 */
+    env = getenv("SREMFB_OUTPUT");
+    C.out.ops = (env && strcmp(env, "drm") == 0) ? &sremfb_output_drm
+                                                 : &sremfb_output_fb;
 
     const char *dectest = NULL;
     int usb_mode = -1;                  /* -1 auto, 0 off, 1 on */
