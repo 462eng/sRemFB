@@ -1,13 +1,14 @@
 /*
- * sremfb-server — exposes one EVDI virtual connector per connected
- * sremfb-client, over a single TCP port.
+ * Source-agnostic client session: accept + hello, the per-client TCP
+ * lifecycle, USB-teleport peer files, and the listen/main-loop driver.
+ * Where pixels come from is the frame source's business (srv->source):
+ * this file only claims/releases the source and shuttles bytes.
  *
- * Lifecycle, per client: connect + hello (geometry + MAC) -> a free EVDI
- * device is claimed and an EDID at that size is plugged in -> the
- * compositor lights it up like a real monitor (hotplug, position restored
- * from monitors.xml — the EDID serial derives from the client's MAC, so
- * each physical client keeps its own position) -> damage-driven frames
- * stream until the client goes away -> connector unplugged, device
+ * Lifecycle, per client: connect + hello (geometry + MAC) -> the source
+ * is acquired (EVDI: a free device is claimed and an EDID plugged in ->
+ * the compositor lights it up like a real monitor, position restored from
+ * monitors.xml — the EDID serial derives from the client's MAC) ->
+ * damage-driven frames stream until the client goes away -> the source is
  * released, like a cable being pulled.
  *
  * Config: --port N / SREMFB_PORT (default 4629),
@@ -20,12 +21,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "sremfb-server.h"
-
-static SremfbServer server = {
-    .listen_fd = -1,
-    .selfheal_left = 8,
-};
+#include "core.h"
 
 static gboolean mac_is_zero(const uint8_t mac[6])
 {
@@ -104,9 +100,9 @@ static void usb_peers_clear(void)
     g_dir_close(d);
 }
 
-/* Client socket died (or never got a working monitor): unplug the
- * connector, release the EVDI device and forget the client. Its position
- * is safe in monitors.xml thanks to the MAC-derived EDID identity. */
+/* Client socket died (or never got a working monitor): release the frame
+ * source and forget the client. For EVDI the position is safe in
+ * monitors.xml thanks to the MAC-derived EDID identity. */
 void sremfb_client_lost(SremfbClient *c)
 {
     g_clear_handle_id(&c->lost_id, g_source_remove);
@@ -117,8 +113,7 @@ void sremfb_client_lost(SremfbClient *c)
         close(c->fd);
         c->fd = -1;
     }
-    sremfb_evdi_unplug(c);
-    sremfb_evdi_release(c);
+    c->srv->source->release(c);
     g_ptr_array_remove(c->srv->clients, c);
     g_message("[%s] client gone (%u still connected)", c->macstr,
               c->srv->clients->len);
@@ -278,11 +273,9 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
               c->h264_cap ? 'y' : 'n', c->usb_cap ? 'y' : 'n',
               hello.model[0] ? hello.model : "(none)");
 
-    if (!sremfb_evdi_acquire(c)) {
-        g_message("[%s] no free evdi device — raise initial_device_count "
-                  "in /etc/modprobe.d/sremfb.conf (or "
-                  "echo 1 > /sys/devices/evdi/add)", c->macstr);
-        net_send_server_hello(cfd, 0, 0, 0, SREMFB_STATUS_NO_DEVICE, 0);
+    int st = srv->source->acquire(c);
+    if (st != SREMFB_STATUS_OK) {
+        net_send_server_hello(cfd, 0, 0, 0, (uint16_t)st, 0);
         close(cfd);
         g_free(c);
         return G_SOURCE_CONTINUE;
@@ -291,7 +284,6 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     g_ptr_array_add(srv->clients, c);
     c->watch_id = g_unix_fd_add(cfd, G_IO_IN | G_IO_HUP | G_IO_ERR,
                                 on_client_io, c);
-    sremfb_evdi_plug(c);
     return G_SOURCE_CONTINUE;
 }
 
@@ -304,94 +296,43 @@ static gboolean on_shutdown_signal(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
-int main(int argc, char **argv)
+/* Listen, run the main loop, tear down. The frame source (srv->source /
+ * srv->src) and srv->port must already be set up by the binary's main().
+ * Returns a process exit code. */
+int sremfb_serve(SremfbServer *srv)
 {
-    long port = SREMFB_DEFAULT_PORT;
-    const char *allow = getenv("SREMFB_ALLOW");
-    const char *env = getenv("SREMFB_PORT");
-
-    if (env)
-        port = atol(env);
-    for (int i = 1; i < argc; i++) {
-        if (g_strcmp0(argv[i], "--port") == 0 && i + 1 < argc) {
-            port = atol(argv[++i]);
-        } else if (g_strcmp0(argv[i], "--allow") == 0 && i + 1 < argc) {
-            allow = argv[++i];
-        } else {
-            g_printerr("usage: %s [--port N] [--allow CIDR,CIDR...]\n"
-                       "  (env: SREMFB_PORT, SREMFB_ALLOW)\n", argv[0]);
-            return 2;
-        }
-    }
-    if (port <= 0 || port > 65535) {
-        g_printerr("invalid port\n");
-        return 2;
-    }
-    server.port = (uint16_t)port;
-
-    if (allow && *allow && !net_allow_parse(&server, allow)) {
-        g_printerr("invalid SREMFB_ALLOW value: %s\n", allow);
-        return 2;
-    }
-
-    /* recreate fresh devices when we can: survivors of a previous
-     * instance wedge mutter on reopen. The number comes from the module
-     * parameter (what a boot would create) — the *runtime* count is not
-     * trustworthy: self-heal leftovers inflate it, an external
-     * remove_all deflates it. */
-    {
-        gchar *cnt = NULL;
-        unsigned n = 2;
-        if (g_file_get_contents(
-                "/sys/module/evdi/parameters/initial_device_count",
-                &cnt, NULL, NULL)) {
-            n = (unsigned)CLAMP(atoi(cnt), 1, 16);
-            g_free(cnt);
-        }
-        sremfb_evdi_reset(n);
-    }
     usb_peers_clear();
+    srv->clients = g_ptr_array_new();
 
-    if (!sremfb_evdi_probe()) {
-        g_printerr("no evdi device — load the module first (modprobe evdi, "
-                   "package evdi-dkms; initial_device_count in "
-                   "/etc/modprobe.d/sremfb.conf sets how many screens can "
-                   "connect at once)\n");
-        return 1;
-    }
-
-    server.clients = g_ptr_array_new();
-    server.devices = g_ptr_array_new();
-
-    server.listen_fd = net_listen((uint16_t)port);
-    if (server.listen_fd < 0) {
-        g_printerr("cannot listen on port %ld: %s\n", port,
+    srv->listen_fd = net_listen(srv->port);
+    if (srv->listen_fd < 0) {
+        g_printerr("cannot listen on port %u: %s\n", srv->port,
                    g_strerror(errno));
         return 1;
     }
-    server.listen_watch_id = g_unix_fd_add(server.listen_fd, G_IO_IN,
-                                           on_listen_ready, &server);
+    srv->listen_watch_id = g_unix_fd_add(srv->listen_fd, G_IO_IN,
+                                         on_listen_ready, srv);
 
-    g_unix_signal_add(SIGINT, on_shutdown_signal, &server);
-    g_unix_signal_add(SIGTERM, on_shutdown_signal, &server);
+    g_unix_signal_add(SIGINT, on_shutdown_signal, srv);
+    g_unix_signal_add(SIGTERM, on_shutdown_signal, srv);
 
-    if (server.n_allow)
-        g_message("allowlist active: %s", allow);
+    if (srv->n_allow)
+        g_message("allowlist active (%u net%s)", srv->n_allow,
+                  srv->n_allow > 1 ? "s" : "");
     else
         g_message("no allowlist — accepting any address");
-    g_message("sremfb-server listening on port %ld", port);
-    server.loop = g_main_loop_new(NULL, FALSE);
-    g_main_loop_run(server.loop);
+    g_message("sremfb-server listening on port %u", srv->port);
+    srv->loop = g_main_loop_new(NULL, FALSE);
+    g_main_loop_run(srv->loop);
 
-    while (server.clients->len > 0)
-        sremfb_client_lost(g_ptr_array_index(server.clients, 0));
-    g_ptr_array_free(server.clients, TRUE);
-    sremfb_evdi_close_all(&server);
-    if (server.listen_watch_id)
-        g_source_remove(server.listen_watch_id);
-    if (server.listen_fd >= 0)
-        close(server.listen_fd);
-    g_main_loop_unref(server.loop);
-    g_free(server.allow);
+    while (srv->clients->len > 0)
+        sremfb_client_lost(g_ptr_array_index(srv->clients, 0));
+    g_ptr_array_free(srv->clients, TRUE);
+    if (srv->listen_watch_id)
+        g_source_remove(srv->listen_watch_id);
+    if (srv->listen_fd >= 0)
+        close(srv->listen_fd);
+    g_main_loop_unref(srv->loop);
+    g_free(srv->allow);
     return 0;
 }

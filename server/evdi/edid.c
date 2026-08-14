@@ -14,7 +14,7 @@
 #include <math.h>
 #include <string.h>
 
-#include "sremfb-server.h"
+#include "evdi.h"
 
 /* Reduced-blanking detailed timing descriptor. Exact porch values are
  * irrelevant for a virtual link; only the resolution and the resulting

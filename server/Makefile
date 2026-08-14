@@ -1,17 +1,25 @@
+# sremfb-server (EVDI backend). The source-agnostic core lives in core/,
+# the EVDI frame source in evdi/. A second binary (sremfb-spice) reuses
+# the same core objects with a SPICE source — see spice/Makefile.
+
 PKGS = glib-2.0 liblz4 x264
 
 CFLAGS ?= -O2 -g
-CFLAGS += -Wall -Wextra -Wno-unused-parameter -I.. $(shell pkg-config --cflags $(PKGS))
+CFLAGS += -Wall -Wextra -Wno-unused-parameter -I.. -Icore -Ievdi \
+          $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS)) -levdi -lm
 
-OBJS = main.o net.o evdi.o edid.o convert.o control.o encoder.o xmit.o
+CORE_OBJS = core/net.o core/convert.o core/control.o core/encoder.o \
+            core/xmit.o core/session.o
+EVDI_OBJS = evdi/evdi.o evdi/edid.o main-evdi.o
 
-sremfb-server: $(OBJS)
-	$(CC) -o $@ $(OBJS) $(LDLIBS)
+sremfb-server: $(CORE_OBJS) $(EVDI_OBJS)
+	$(CC) -o $@ $^ $(LDLIBS)
 
-$(OBJS): sremfb-server.h ../protocol.h
+$(CORE_OBJS): core/core.h core/source.h ../protocol.h
+$(EVDI_OBJS): core/core.h core/source.h evdi/evdi.h ../protocol.h
 
 clean:
-	rm -f sremfb-server rfb-server *.o
+	rm -f sremfb-server rfb-server *.o core/*.o evdi/*.o
 
 .PHONY: clean

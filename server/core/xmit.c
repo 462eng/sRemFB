@@ -33,7 +33,7 @@
 #include <glib-unix.h>
 #include <lz4.h>
 
-#include "sremfb-server.h"
+#include "core.h"
 
 #define XMIT_DIRTY_MAX  16          /* matches struct SremfbClient */
 
@@ -75,22 +75,22 @@ void sremfb_xmit_hello(SremfbClient *c, uint8_t flags)
 {
     struct sremfb_server_hello sh;
 
-    net_fill_server_hello(&sh, (uint16_t)c->mode.width,
-                          (uint16_t)c->mode.height, c->hello.pixfmt,
+    net_fill_server_hello(&sh, (uint16_t)c->geom.width,
+                          (uint16_t)c->geom.height, c->hello.pixfmt,
                           SREMFB_STATUS_OK, flags);
     sremfb_xmit_ctrl(c, &sh, sizeof(sh));
 }
 
 /* ------------------------------------------------------- dirty region */
 
-static gboolean rects_touch(const struct evdi_rect *a,
-                            const struct evdi_rect *b)
+static gboolean rects_touch(const struct sremfb_rect *a,
+                            const struct sremfb_rect *b)
 {
     return a->x1 <= b->x2 && b->x1 <= a->x2 &&
            a->y1 <= b->y2 && b->y1 <= a->y2;
 }
 
-static void rect_union(struct evdi_rect *a, const struct evdi_rect *b)
+static void rect_union(struct sremfb_rect *a, const struct sremfb_rect *b)
 {
     a->x1 = MIN(a->x1, b->x1);
     a->y1 = MIN(a->y1, b->y1);
@@ -98,7 +98,7 @@ static void rect_union(struct evdi_rect *a, const struct evdi_rect *b)
     a->y2 = MAX(a->y2, b->y2);
 }
 
-static void dirty_add(SremfbClient *c, const struct evdi_rect *r)
+static void dirty_add(SremfbClient *c, const struct sremfb_rect *r)
 {
     if (c->dirty_all)
         return;
@@ -125,9 +125,9 @@ static void dirty_add(SremfbClient *c, const struct evdi_rect *r)
  * without the trim that costs a full frame on the wire per tick per
  * client, and 50-100 ms of decompress+blit on the SBC behind which the
  * cursor updates queue up. Returns FALSE when nothing really changed. */
-static gboolean rect_trim(SremfbClient *c, struct evdi_rect *r)
+static gboolean rect_trim(SremfbClient *c, struct sremfb_rect *r)
 {
-    size_t stride = (size_t)c->mode.width * 4;
+    size_t stride = (size_t)c->geom.width * 4;
     size_t rowoff = (size_t)r->x1 * 4;
     size_t rowlen = (size_t)(r->x2 - r->x1) * 4;
 
@@ -148,17 +148,17 @@ static gboolean rect_trim(SremfbClient *c, struct evdi_rect *r)
 
 /* Damage arrived (grabbuf freshly filled). Clamps, trims, accumulates,
  * arms. */
-void sremfb_xmit_damage(SremfbClient *c, const struct evdi_rect *rects,
+void sremfb_xmit_damage(SremfbClient *c, const struct sremfb_rect *rects,
                         int num, unsigned bytespp)
 {
     size_t raw = 0;
 
     for (int i = 0; i < num; i++) {
-        struct evdi_rect r = {
-            .x1 = CLAMP(rects[i].x1, 0, c->mode.width),
-            .y1 = CLAMP(rects[i].y1, 0, c->mode.height),
-            .x2 = CLAMP(rects[i].x2, 0, c->mode.width),
-            .y2 = CLAMP(rects[i].y2, 0, c->mode.height),
+        struct sremfb_rect r = {
+            .x1 = CLAMP(rects[i].x1, 0, c->geom.width),
+            .y1 = CLAMP(rects[i].y1, 0, c->geom.height),
+            .x2 = CLAMP(rects[i].x2, 0, c->geom.width),
+            .y2 = CLAMP(rects[i].y2, 0, c->geom.height),
         };
         if (r.x2 <= r.x1 || r.y2 <= r.y1)
             continue;
@@ -190,7 +190,7 @@ void sremfb_xmit_set_mode(SremfbClient *c, SremfbXmitMode mode)
         return;
 
     if (mode == SREMFB_XMIT_H264) {
-        uint32_t w = (uint32_t)c->mode.width, h = (uint32_t)c->mode.height;
+        uint32_t w = (uint32_t)c->geom.width, h = (uint32_t)c->geom.height;
         if (!c->enc) {
             int kbps = sremfb_ctl_initial_kbps(c);
             c->enc = sremfb_enc_open((int)w, (int)h, kbps);
@@ -254,7 +254,7 @@ static void frame_start(SremfbClient *c, const uint8_t *seg0, size_t len0,
 static void shadow_update(SremfbClient *c, uint32_t x, uint32_t y,
                           uint32_t w, uint32_t h)
 {
-    size_t stride = (size_t)c->mode.width * 4;
+    size_t stride = (size_t)c->geom.width * 4;
 
     if (!c->shadowbuf)
         return;
@@ -265,7 +265,7 @@ static void shadow_update(SremfbClient *c, uint32_t x, uint32_t y,
 }
 
 /* One RAW/LZ4 rect from the current grabbuf into sendbuf. */
-static void build_raw_rect(SremfbClient *c, const struct evdi_rect *r)
+static void build_raw_rect(SremfbClient *c, const struct sremfb_rect *r)
 {
     unsigned bytespp = (c->hello.pixfmt == SREMFB_PIX_RGB565) ? 2 : 4;
     uint32_t x = (uint32_t)r->x1, y = (uint32_t)r->y1;
@@ -278,7 +278,7 @@ static void build_raw_rect(SremfbClient *c, const struct evdi_rect *r)
     for (uint32_t row = 0; row < h; row++)
         sremfb_convert_bgrx_row(
             c->rectbuf + (size_t)row * w * bytespp,
-            c->grabbuf + ((size_t)(y + row) * c->mode.width + x) * 4,
+            c->grabbuf + ((size_t)(y + row) * c->geom.width + x) * 4,
             w, c->hello.pixfmt, x, y + row);
     shadow_update(c, x, y, w, h);
 
@@ -310,7 +310,7 @@ static void build_raw_rect(SremfbClient *c, const struct evdi_rect *r)
 /* One full-frame H.264 access unit from the current grabbuf. */
 static void build_h264_frame(SremfbClient *c)
 {
-    uint32_t w = (uint32_t)c->mode.width, h = (uint32_t)c->mode.height;
+    uint32_t w = (uint32_t)c->geom.width, h = (uint32_t)c->geom.height;
     size_t luma = (size_t)w * h;
     size_t chroma = (size_t)((w + 1) / 2) * ((h + 1) / 2);
     uint8_t *y = c->yuvbuf, *u = y + luma, *v = u + chroma;
@@ -379,9 +379,9 @@ static gboolean build_next(SremfbClient *c)
     }
 
     if (c->dirty_all) {
-        struct evdi_rect full = {
+        struct sremfb_rect full = {
             .x1 = 0, .y1 = 0,
-            .x2 = c->mode.width, .y2 = c->mode.height,
+            .x2 = c->geom.width, .y2 = c->geom.height,
         };
         c->dirty_all = FALSE;
         c->dirty_n = 0;
@@ -390,7 +390,7 @@ static gboolean build_next(SremfbClient *c)
         return c->out_active;
     }
     if (c->dirty_n > 0) {
-        struct evdi_rect r = c->dirty[0];
+        struct sremfb_rect r = c->dirty[0];
         c->dirty_n--;
         memmove(&c->dirty[0], &c->dirty[1],
                 (size_t)c->dirty_n * sizeof(r));

@@ -24,7 +24,7 @@
 
 #include <x264.h>
 
-#include "sremfb-server.h"
+#include "core.h"
 
 struct SremfbEncoder {
     x264_t *h;

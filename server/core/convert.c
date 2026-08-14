@@ -1,7 +1,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sremfb-server.h"
+#include "core.h"
 
 /* 4x4 Bayer ordered-dither matrix (values 0..15). Spreads the 8->5/6 bit
  * quantization error spatially, which removes banding on gradients at the

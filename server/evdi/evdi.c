@@ -28,7 +28,7 @@
 
 #include <lz4.h>
 
-#include "sremfb-server.h"
+#include "evdi.h"
 
 #define MAX_GRAB_RECTS  16
 #define GRAB_BUFFER_ID  0
@@ -36,6 +36,10 @@
 /* DRM constants, redeclared to avoid dragging libdrm headers in */
 #define DPMS_MODE_ON    0
 #define FOURCC_XR24     0x34325258u        /* DRM_FORMAT_XRGB8888 */
+
+/* backend-private state, hung off the generic core structs */
+#define EV(c)    ((SremfbEvdiClient *)(c)->src_ctx)
+#define EVS(srv) ((SremfbEvdiState *)(srv)->src)
 
 static void sremfb_evdi_kick(SremfbClient *c);
 
@@ -94,14 +98,16 @@ static void grab_and_send(SremfbClient *c)
     int num = MAX_GRAB_RECTS;
     unsigned bytespp = (c->hello.pixfmt == SREMFB_PIX_RGB565) ? 2 : 4;
 
-    if (!c->grab_registered)
+    if (!EV(c)->grab_registered)
         return;
-    evdi_grab_pixels(c->dev->handle, rects, &num);
+    evdi_grab_pixels(EV(c)->dev->handle, rects, &num);
     if (num <= 0 || c->fd < 0 || c->state != SREMFB_CLIENT_STREAMING)
         return;
 
     c->st_grabs++;
-    sremfb_xmit_damage(c, rects, num, bytespp);
+    /* struct evdi_rect and struct sremfb_rect are the same {x1,y1,x2,y2}
+     * layout — the core takes damage in the neutral type. */
+    sremfb_xmit_damage(c, (const struct sremfb_rect *)rects, num, bytespp);
     send_stats(c);
 }
 
@@ -111,7 +117,7 @@ static gboolean kick_idle(gpointer data)
 {
     SremfbClient *c = data;
 
-    c->kick_id = 0;
+    EV(c)->kick_id = 0;
     sremfb_evdi_kick(c);
     return G_SOURCE_REMOVE;
 }
@@ -122,16 +128,16 @@ static gboolean kick_idle(gpointer data)
  * damage. */
 static void sremfb_evdi_kick(SremfbClient *c)
 {
-    if (c->state != SREMFB_CLIENT_STREAMING || !c->grab_registered ||
-        c->fd < 0 || c->update_pending || c->lost_id)
+    if (c->state != SREMFB_CLIENT_STREAMING || !EV(c)->grab_registered ||
+        c->fd < 0 || EV(c)->update_pending || c->lost_id)
         return;
 
-    if (evdi_request_update(c->dev->handle, GRAB_BUFFER_ID)) {
+    if (evdi_request_update(EV(c)->dev->handle, GRAB_BUFFER_ID)) {
         grab_and_send(c);
-        if (!c->kick_id)
-            c->kick_id = g_idle_add(kick_idle, c);
+        if (!EV(c)->kick_id)
+            EV(c)->kick_id = g_idle_add(kick_idle, c);
     } else {
-        c->update_pending = TRUE;
+        EV(c)->update_pending = TRUE;
     }
 }
 
@@ -144,10 +150,10 @@ static void on_update_ready(int buffer, void *data)
     (void)buffer;
     if (!c)
         return;
-    c->update_pending = FALSE;
+    EV(c)->update_pending = FALSE;
     grab_and_send(c);
-    if (!c->kick_id)
-        c->kick_id = g_idle_add(kick_idle, c);
+    if (!EV(c)->kick_id)
+        EV(c)->kick_id = g_idle_add(kick_idle, c);
 }
 
 static void on_mode_changed(struct evdi_mode mode, void *data)
@@ -173,22 +179,23 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
     sremfb_xmit_reset(c);
 
     /* a resolution change invalidates the encoder and the H.264 episode */
-    if (c->enc && (mode.width != c->mode.width ||
-                   mode.height != c->mode.height)) {
+    if (c->enc && (mode.width != c->geom.width ||
+                   mode.height != c->geom.height)) {
         sremfb_enc_close(c->enc);
         c->enc = NULL;
         g_clear_pointer(&c->yuvbuf, g_free);
         c->xmit_mode = SREMFB_XMIT_RAW;
     }
 
-    c->mode = mode;
-    c->mode_valid = TRUE;
-    c->dev->suspect = FALSE;       /* the card proved usable */
+    c->geom.width = mode.width;
+    c->geom.height = mode.height;
+    EV(c)->mode_valid = TRUE;
+    EV(c)->dev->suspect = FALSE;       /* the card proved usable */
 
     /* (re)build the grab and wire buffers at the new size */
-    if (c->grab_registered) {
-        evdi_unregister_buffer(c->dev->handle, GRAB_BUFFER_ID);
-        c->grab_registered = FALSE;
+    if (EV(c)->grab_registered) {
+        evdi_unregister_buffer(EV(c)->dev->handle, GRAB_BUFFER_ID);
+        EV(c)->grab_registered = FALSE;
     }
     g_free(c->grabbuf);
     c->grabbuf = g_malloc((size_t)mode.width * mode.height * 4);
@@ -202,9 +209,9 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         .height = mode.height,
         .stride = mode.width * 4,
     };
-    evdi_register_buffer(c->dev->handle, buf);
-    c->grab_registered = TRUE;
-    c->update_pending = FALSE;
+    evdi_register_buffer(EV(c)->dev->handle, buf);
+    EV(c)->grab_registered = TRUE;
+    EV(c)->update_pending = FALSE;
 
     unsigned bytespp = (c->hello.pixfmt == SREMFB_PIX_RGB565) ? 2 : 4;
     c->rectbuf_size = (size_t)mode.width * mode.height * bytespp;
@@ -220,7 +227,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         if (c->feedback && c->h264_cap && !c->h264_failed &&
             getenv("SREMFB_NO_H264") == NULL)
             flags |= SREMFB_SRV_FLAG_H264;
-        g_clear_handle_id(&c->mode_timeout_id, g_source_remove);
+        g_clear_handle_id(&EV(c)->mode_timeout_id, g_source_remove);
         sremfb_xmit_hello(c, flags);
         c->state = SREMFB_CLIENT_STREAMING;
         c->st_grabs = c->st_rects = c->st_wire_bytes = c->st_raw_bytes = 0;
@@ -229,7 +236,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         /* a connector lighting up proves mutter is alive and accepting
          * hotplugs — rearm the self-heal budget (it only guards against
          * creating devices forever when mutter is truly gone) */
-        c->srv->selfheal_left = 8;
+        EVS(c->srv)->selfheal_left = 8;
         sremfb_usb_peer_add(c);
         g_message("[%s] streaming %dx%d", c->macstr, mode.width, mode.height);
     }
@@ -295,7 +302,7 @@ static int self_heal_add(SremfbServer *srv)
 {
     gboolean existed[32] = { FALSE };
 
-    if (srv->selfheal_left == 0) {
+    if (EVS(srv)->selfheal_left == 0) {
         g_warning("self-heal budget spent — a session re-login will "
                   "clear mutter");
         return -1;
@@ -315,7 +322,7 @@ static int self_heal_add(SremfbServer *srv)
         return -1;
     }
     close(fd);
-    srv->selfheal_left--;
+    EVS(srv)->selfheal_left--;
 
     /* the node appears asynchronously (udev) */
     for (int tries = 0; tries < 40; tries++) {
@@ -332,17 +339,17 @@ static gboolean on_mode_timeout(gpointer data)
 {
     SremfbClient *c = data;
 
-    c->mode_timeout_id = 0;
+    EV(c)->mode_timeout_id = 0;
     g_warning("[%s] compositor did not light up the connector within 10s "
               "(is a Wayland/GNOME session running?)", c->macstr);
-    if (c->dev) {
+    if (EV(c)->dev) {
         /* mutter probably hit its EBUSY-on-reopen bug on this card:
          * quarantine it so the client's retry lands on another device,
          * and let the next acquire self-heal with a fresh device */
-        c->dev->suspect = TRUE;
-        c->srv->wedge_seen = TRUE;
+        EV(c)->dev->suspect = TRUE;
+        EVS(c->srv)->wedge_seen = TRUE;
         g_warning("[%s] quarantining /dev/dri/card%d", c->macstr,
-                  c->dev->card);
+                  EV(c)->dev->card);
     }
     if (c->fd >= 0)
         net_send_server_hello(c->fd, 0, 0, 0, SREMFB_STATUS_SERVER_FAIL, 0);
@@ -371,15 +378,15 @@ static uint32_t client_serial(const SremfbClient *c)
 /* "Plug the cable": connect an EDID at the client's resolution. The
  * compositor reacts with a hotplug, restores the layout position and
  * sets our mode (on_mode_changed). */
-void sremfb_evdi_plug(SremfbClient *c)
+static void sremfb_evdi_plug(SremfbClient *c)
 {
-    sremfb_edid_build(c->edid, c->hello.xres, c->hello.yres,
+    sremfb_edid_build(EV(c)->edid, c->hello.xres, c->hello.yres,
                       client_serial(c), c->hello.model);
-    evdi_connect(c->dev->handle, c->edid, sizeof(c->edid),
+    evdi_connect(EV(c)->dev->handle, EV(c)->edid, sizeof(EV(c)->edid),
                  (uint32_t)c->hello.xres * c->hello.yres);
-    c->plugged = TRUE;
+    EV(c)->plugged = TRUE;
     c->state = SREMFB_CLIENT_MODE_WAIT;
-    c->mode_timeout_id = g_timeout_add_seconds(10, on_mode_timeout, c);
+    EV(c)->mode_timeout_id = g_timeout_add_seconds(10, on_mode_timeout, c);
     g_message("[%s] connector plugged at %ux%u (serial 0x%08x), waiting "
               "for the compositor", c->macstr, c->hello.xres, c->hello.yres,
               client_serial(c));
@@ -387,26 +394,26 @@ void sremfb_evdi_plug(SremfbClient *c)
 
 /* "Unplug the cable". The compositor sees a disconnect and re-tiles, and
  * will restore the layout on the next plug (stable EDID identity). */
-void sremfb_evdi_unplug(SremfbClient *c)
+static void sremfb_evdi_unplug(SremfbClient *c)
 {
     sremfb_xmit_reset(c);
     sremfb_ctl_stop(c);
-    g_clear_handle_id(&c->mode_timeout_id, g_source_remove);
-    g_clear_handle_id(&c->kick_id, g_source_remove);
-    if (c->grab_registered) {
-        evdi_unregister_buffer(c->dev->handle, GRAB_BUFFER_ID);
-        c->grab_registered = FALSE;
+    g_clear_handle_id(&EV(c)->mode_timeout_id, g_source_remove);
+    g_clear_handle_id(&EV(c)->kick_id, g_source_remove);
+    if (EV(c)->grab_registered) {
+        evdi_unregister_buffer(EV(c)->dev->handle, GRAB_BUFFER_ID);
+        EV(c)->grab_registered = FALSE;
     }
     g_clear_pointer(&c->grabbuf, g_free);
     g_clear_pointer(&c->shadowbuf, g_free);
     g_clear_pointer(&c->rectbuf, g_free);
     g_clear_pointer(&c->sendbuf, g_free);
     c->rectbuf_size = c->sendbuf_size = 0;
-    c->mode_valid = FALSE;
-    c->update_pending = FALSE;
-    if (c->plugged) {
-        evdi_disconnect(c->dev->handle);
-        c->plugged = FALSE;
+    EV(c)->mode_valid = FALSE;
+    EV(c)->update_pending = FALSE;
+    if (EV(c)->plugged) {
+        evdi_disconnect(EV(c)->dev->handle);
+        EV(c)->plugged = FALSE;
         g_message("[%s] connector unplugged", c->macstr);
     }
 }
@@ -477,12 +484,12 @@ static gboolean acquire_pooled(SremfbClient *c, gboolean allow_suspect)
 {
     SremfbServer *srv = c->srv;
 
-    for (guint i = 0; i < srv->devices->len; i++) {
-        SremfbEvdiDevice *dev = g_ptr_array_index(srv->devices, i);
+    for (guint i = 0; i < EVS(srv)->devices->len; i++) {
+        SremfbEvdiDevice *dev = g_ptr_array_index(EVS(srv)->devices, i);
         if (dev->owner || (dev->suspect && !allow_suspect))
             continue;
         dev->owner = c;
-        c->dev = dev;
+        EV(c)->dev = dev;
         g_message("[%s] using evdi device /dev/dri/card%d (pooled%s)",
                   c->macstr, dev->card,
                   dev->suspect ? ", suspect — last resort" : "");
@@ -516,13 +523,13 @@ static gboolean acquire_card(SremfbClient *c, int i, const char *how)
     dev->owner = c;
     dev->watch_id = g_unix_fd_add(evdi_get_event_ready(handle),
                                   G_IO_IN, on_evdi_ready, dev);
-    g_ptr_array_add(c->srv->devices, dev);
-    c->dev = dev;
+    g_ptr_array_add(EVS(c->srv)->devices, dev);
+    EV(c)->dev = dev;
     g_message("[%s] using evdi device /dev/dri/card%d%s", c->macstr, i, how);
     return TRUE;
 }
 
-gboolean sremfb_evdi_acquire(SremfbClient *c)
+static gboolean sremfb_evdi_acquire(SremfbClient *c)
 {
     SremfbServer *srv = c->srv;
 
@@ -532,7 +539,7 @@ gboolean sremfb_evdi_acquire(SremfbClient *c)
     /* Once a wedge was seen, pre-existing free devices are mutter
      * minefields: hand out a brand-new one instead — created right now,
      * so the EDID plug lands within mutter's short acceptance window. */
-    if (srv->wedge_seen) {
+    if (EVS(srv)->wedge_seen) {
         int fresh = self_heal_add(srv);
         if (fresh >= 0 && acquire_card(c, fresh, " (fresh, self-heal)"))
             return TRUE;
@@ -550,25 +557,58 @@ gboolean sremfb_evdi_acquire(SremfbClient *c)
 }
 
 /* The device stays open and flocked: only the ownership is returned. */
-void sremfb_evdi_release(SremfbClient *c)
+static void sremfb_evdi_release(SremfbClient *c)
 {
-    if (c->dev) {
-        c->dev->owner = NULL;
-        c->dev = NULL;
+    if (EV(c)->dev) {
+        EV(c)->dev->owner = NULL;
+        EV(c)->dev = NULL;
     }
 }
 
+/* --------------------------------------------------------- source ops */
+
+/* Claim a device and plug an EDID. The compositor lights the connector
+ * asynchronously; on_mode_changed then transitions the client to
+ * STREAMING and sends the server hello. */
+static int evdi_source_acquire(SremfbClient *c)
+{
+    c->src_ctx = g_new0(SremfbEvdiClient, 1);
+    if (!sremfb_evdi_acquire(c)) {
+        g_message("[%s] no free evdi device — raise initial_device_count "
+                  "in /etc/modprobe.d/sremfb.conf (or "
+                  "echo 1 > /sys/devices/evdi/add)", c->macstr);
+        g_clear_pointer(&c->src_ctx, g_free);
+        return SREMFB_STATUS_NO_DEVICE;
+    }
+    sremfb_evdi_plug(c);
+    return SREMFB_STATUS_OK;
+}
+
+static void evdi_source_release(SremfbClient *c)
+{
+    if (!c->src_ctx)
+        return;
+    sremfb_evdi_unplug(c);
+    sremfb_evdi_release(c);
+    g_clear_pointer(&c->src_ctx, g_free);
+}
+
+const struct sremfb_source_ops sremfb_evdi_ops = {
+    .acquire = evdi_source_acquire,
+    .release = evdi_source_release,
+};
+
 void sremfb_evdi_close_all(SremfbServer *srv)
 {
-    if (!srv->devices)
+    if (!EVS(srv)->devices)
         return;
-    for (guint i = 0; i < srv->devices->len; i++) {
-        SremfbEvdiDevice *dev = g_ptr_array_index(srv->devices, i);
+    for (guint i = 0; i < EVS(srv)->devices->len; i++) {
+        SremfbEvdiDevice *dev = g_ptr_array_index(EVS(srv)->devices, i);
         g_clear_handle_id(&dev->watch_id, g_source_remove);
         evdi_close(dev->handle);
         close(dev->lock_fd);
         g_free(dev);
     }
-    g_ptr_array_free(srv->devices, TRUE);
-    srv->devices = NULL;
+    g_ptr_array_free(EVS(srv)->devices, TRUE);
+    EVS(srv)->devices = NULL;
 }

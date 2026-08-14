@@ -8,7 +8,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#include "sremfb-server.h"
+#include "core.h"
 
 int net_listen(uint16_t port)
 {

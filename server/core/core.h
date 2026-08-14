@@ -1,29 +1,14 @@
-#ifndef SREMFB_SERVER_H
-#define SREMFB_SERVER_H
+#ifndef SREMFB_CORE_H
+#define SREMFB_CORE_H
 
 #include <glib.h>
-#include <evdi_lib.h>
 #include <netinet/in.h>
 
 #include "protocol.h"
+#include "source.h"
 
 typedef struct SremfbServer SremfbServer;
 typedef struct SremfbClient SremfbClient;
-
-/* One EVDI DRM device. Opened on demand but then kept open (and flocked)
- * for the whole process lifetime: mutter wedges (EBUSY on reopen, then
- * ignores hotplugs on that card) when the device is closed and reopened
- * between plugs. Freed clients just leave their device back in the pool. */
-typedef struct {
-    evdi_handle handle;
-    int card;                  /* /dev/dri/card<card> */
-    int lock_fd;               /* flock: arbitration across processes */
-    guint watch_id;
-    SremfbClient *owner;       /* NULL = free */
-    gboolean suspect;          /* mode timeout seen: mutter probably wedged
-                                  on this card (EBUSY reopen bug) — only
-                                  reused as a last resort */
-} SremfbEvdiDevice;
 
 typedef enum {
     SREMFB_CLIENT_MODE_WAIT = 0,  /* EDID plugged, waiting for the
@@ -47,9 +32,10 @@ typedef enum {
 
 struct SremfbEncoder;             /* encoder.c, keeps x264.h out of here */
 
-/* One connected client = one TCP socket + one EVDI connector. The MAC
- * address sent in the hello identifies the physical client: it drives the
- * EDID serial, so GNOME remembers one layout position per client. */
+/* One connected client = one TCP socket + one frame source (an EVDI
+ * connector, a SPICE display, ...). The MAC address sent in the hello
+ * identifies the physical client: it drives the EDID serial, so GNOME
+ * remembers one layout position per client. */
 struct SremfbClient {
     SremfbServer *srv;
     SremfbClientState state;
@@ -62,22 +48,17 @@ struct SremfbClient {
     char macstr[18];
     guint lost_id;             /* deferred sremfb_client_lost (g_idle) */
 
-    /* evdi virtual connector */
-    SremfbEvdiDevice *dev;     /* pooled device, NULL when none */
-    gboolean plugged;          /* EDID connected (cable "plugged in") */
-    uint8_t edid[128];
-    struct evdi_mode mode;
-    gboolean mode_valid;
-    gboolean grab_registered;
-    uint8_t *grabbuf;          /* BGRx buffer registered with evdi */
+    /* frame source */
+    void *src_ctx;             /* backend-private per-client state
+                                  (SremfbEvdiClient, ...); NULL until
+                                  the source's acquire() runs */
+    struct sremfb_geom geom;   /* stream geometry (the client resolution) */
+    uint8_t *grabbuf;          /* current full frame, BGRx (XRGB8888 LE);
+                                  the source fills it, the core reads it */
     uint8_t *shadowbuf;        /* what the client last got (BGRx): damage
                                   is trimmed against it, because mutter
                                   fans some animations out as full-frame
                                   damage with identical pixels */
-    gboolean update_pending;   /* update requested, update_ready will fire */
-    guint kick_id;             /* deferred next update request (g_idle) */
-    guint mode_timeout_id;     /* answers SERVER_FAIL if the compositor
-                                  never enables the connector */
 
     /* wire buffers */
     uint8_t *rectbuf;          /* one converted rect, client pixel format */
@@ -98,7 +79,7 @@ struct SremfbClient {
     gboolean out_active;       /* a frame is partially sent */
     guint out_watch_id;        /* G_IO_OUT watch, armed while work pends */
     guint out_retry_id;        /* encode-pacing retry (decoder behind) */
-    struct evdi_rect dirty[16];
+    struct sremfb_rect dirty[16];
     int dirty_n;
     gboolean dirty_all;        /* full frame pending (H.264 / snapshot) */
     size_t dirty_raw;          /* damage bytes accumulated since last build */
@@ -165,24 +146,23 @@ struct SremfbServer {
     guint listen_watch_id;
 
     GPtrArray *clients;        /* SremfbClient* */
-    GPtrArray *devices;        /* SremfbEvdiDevice*, open for the whole
-                                  process lifetime */
 
     SremfbAllowNet *allow;     /* empty = allow everyone */
     unsigned n_allow;
 
-    unsigned selfheal_left;    /* fresh-device additions still allowed */
-    gboolean wedge_seen;       /* a mode-timeout happened: distrust the
-                                  pre-existing free devices */
+    const struct sremfb_source_ops *source;  /* the active frame backend */
+    void *src;                 /* backend-private server-wide state
+                                  (SremfbEvdiState, ...) */
 };
 
 #define SREMFB_MAX_CLIENTS 8
 
-/* main.c */
+/* session.c — source-agnostic client lifecycle */
 void sremfb_client_lost(SremfbClient *c);
 void sremfb_schedule_client_lost(SremfbClient *c);
 void sremfb_usb_peer_add(SremfbClient *c);     /* streaming + usb_cap */
 void sremfb_usb_peer_remove(SremfbClient *c);
+int  sremfb_serve(SremfbServer *srv);          /* listen + run the loop */
 
 /* net.c */
 int      net_listen(uint16_t port);
@@ -199,19 +179,6 @@ void     net_fill_server_hello(struct sremfb_server_hello *sh,
                                uint8_t pixfmt, uint16_t status,
                                uint8_t flags);
 gboolean net_allow_parse(SremfbServer *srv, const char *spec);
-
-/* edid.c */
-void sremfb_edid_build(uint8_t out[128], uint32_t width, uint32_t height,
-                       uint32_t serial, const char model[13]);
-
-/* evdi.c */
-void     sremfb_evdi_reset(unsigned count);  /* best-effort fresh devices */
-gboolean sremfb_evdi_probe(void);            /* any evdi device present? */
-gboolean sremfb_evdi_acquire(SremfbClient *c);
-void     sremfb_evdi_release(SremfbClient *c);   /* back to the pool */
-void     sremfb_evdi_close_all(SremfbServer *srv);
-void     sremfb_evdi_plug(SremfbClient *c);
-void     sremfb_evdi_unplug(SremfbClient *c);
 
 /* convert.c */
 void sremfb_convert_bgrx_row(uint8_t *dst, const uint8_t *src, uint32_t width,
@@ -239,7 +206,7 @@ gboolean    sremfb_ctl_skip_encode(SremfbClient *c);
 const char *sremfb_ctl_state_name(const SremfbClient *c);
 
 /* xmit.c — per-client non-blocking transmit queue */
-void sremfb_xmit_damage(SremfbClient *c, const struct evdi_rect *rects,
+void sremfb_xmit_damage(SremfbClient *c, const struct sremfb_rect *rects,
                         int num, unsigned bytespp);
 void sremfb_xmit_ctrl(SremfbClient *c, const void *msg, size_t len);
 void sremfb_xmit_hello(SremfbClient *c, uint8_t flags);
@@ -247,4 +214,4 @@ void sremfb_xmit_set_mode(SremfbClient *c, SremfbXmitMode mode);
 void sremfb_xmit_kick(SremfbClient *c);      /* (re)arm the drain */
 void sremfb_xmit_reset(SremfbClient *c);     /* teardown / mode change */
 
-#endif /* SREMFB_SERVER_H */
+#endif /* SREMFB_CORE_H */

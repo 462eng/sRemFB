@@ -24,7 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "sremfb-server.h"
+#include "core.h"
 
 #define PING_INTERVAL_MS   250
 #define PING_IDLE_US       2000000   /* heartbeat period on a silent link */
