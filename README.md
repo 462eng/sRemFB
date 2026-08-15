@@ -44,6 +44,35 @@ GNOME blanks its outputs (DPMS pass-through).
 | Raspberry Pi 1 | 🟡 likely supported | not tested; reduced performance expected (100 Mbit limit) |
 | Banana Pi M1+ | ✅ supported | RGB565 recommended; RAM-limited (videos mostly fine) |
 
+## Testers wanted & upcoming features
+
+**Testers welcome!** The boards marked "not tested" above are waiting for
+you, and other SBCs stand a good chance too: the client only needs a
+framebuffer (`/dev/fb0`) and libc — Orange Pi, Odroid, Rockchip, other
+Allwinner boards… Open an
+[issue](https://github.com/462eng/sRemFB/issues) with the board, OS,
+resolution and how it feels (fps, latency) — even a simple "it works"
+helps.
+
+**In the works** (1.4.x line):
+
+- **SPICE / Proxmox backend — virtual infrastructure on thin clients.**
+  The goal: run a fleet of **fully virtualized** workstations (QEMU/KVM
+  VMs on Proxmox) where each physical seat is just a $30 SBC behind the
+  screen — and **feels exactly like a local PC, indistinguishable in
+  use**: smooth display, local keyboard/mouse/USB (teleport), boots
+  straight to the desk. The server captures the VM display (spice-glib)
+  and streams it to the same clients, no EVDI involved. Working
+  prototype validated against QEMU; Proxmox testing underway.
+- **Native DRM/KMS client output** — direct scanout (RGB565 or XRGB8888)
+  bypassing fbdev, tear-free page-flip on full frames. Validated on a
+  Pi 500, running in production at the author's.
+- **Multi-display per SBC** — drive both HDMI outputs of a Pi 4/5 as two
+  independent monitors (or two VM heads).
+- **Audio** — carried separately from video, QoS-friendly.
+- **USB redirection into VMs** — today's USB teleport, extended to the
+  thin-client scenario (usbredir).
+
 ## How it works
 
 - In its hello the client announces: the framebuffer geometry

@@ -44,6 +44,36 @@ et quand GNOME blanke ses écrans (DPMS transmis).
 | Raspberry Pi 1 | 🟡 support probable | non testé ; performances réduites attendues (limitation 100 Mbit) |
 | Banana Pi M1+ | ✅ supporté | RGB565 recommandé ; limité par sa RAM (vidéos globalement ok) |
 
+## Testeurs recherchés & fonctionnalités à venir
+
+**Testeurs bienvenus !** Les cartes marquées « non testé » ci-dessus ne
+demandent qu'à l'être, et les autres SBC ont toutes leurs chances : le
+client n'exige qu'un framebuffer (`/dev/fb0`) et la libc — Orange Pi,
+Odroid, Rockchip, autres Allwinner… Ouvrez une
+[issue](https://github.com/462eng/sRemFB/issues) avec la carte, l'OS, la
+résolution et le ressenti (fps, latence) — même un simple « ça marche »
+aide.
+
+**En préparation** (ligne 1.4.x) :
+
+- **Backend SPICE / Proxmox — l'infra virtuelle sur thin clients.** Le
+  but : monter un parc de postes de travail **entièrement virtualisé**
+  (VM QEMU/KVM sur Proxmox) dont chaque poste physique n'est qu'un SBC à
+  quelques dizaines d'euros derrière l'écran — et qui **s'utilise comme
+  un PC local, sans qu'on puisse faire la différence** : écran fluide,
+  clavier/souris/USB locaux (téléport), démarrage sur la dalle. Le
+  serveur capture l'écran de la VM (spice-glib) et le diffuse aux mêmes
+  clients, sans EVDI. Prototype fonctionnel validé contre QEMU ; test
+  Proxmox en cours.
+- **Sortie DRM/KMS native côté client** — scanout direct (RGB565 ou
+  XRGB8888) sans passer par fbdev, page-flip sans déchirure sur les
+  frames pleines. Validé sur Pi 500, en prod chez l'auteur.
+- **Multi-écrans par SBC** — piloter les deux sorties HDMI d'un Pi 4/5
+  comme deux moniteurs (ou deux têtes de VM) indépendants.
+- **Audio** — transport séparé du flux vidéo, avec QoS possible.
+- **Redirection USB vers les VM** — le téléport USB actuel, étendu au
+  scénario thin client (usbredir).
+
 ## Fonctionnement
 
 - Le client annonce dans son hello : géométrie du framebuffer
