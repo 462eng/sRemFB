@@ -32,6 +32,18 @@ GNOME blanks its outputs (DPMS pass-through).
 - **[PROTOCOL.md](PROTOCOL.md)** — the network protocol (v2), field by
   field.
 
+## Supported SBCs
+
+| SBC | Status | Notes |
+|---|---|---|
+| Raspberry Pi 5 / 500 / 500+ | ✅ full support | flawless at 60 fps, no lag |
+| Raspberry Pi 4 / 400 | ✅ supported | not tested yet |
+| Raspberry Pi 3B+ | ✅ supported | usable at 30 fps, delays on dynamic content |
+| Raspberry Pi 3B | ✅ supported | not tested yet |
+| Raspberry Pi 2 | ✅ supported | not tested; reduced performance expected (100 Mbit limit) |
+| Raspberry Pi 1 | 🟡 likely supported | not tested; reduced performance expected (100 Mbit limit) |
+| Banana Pi M1+ | ✅ supported | RGB565 recommended; RAM-limited (videos mostly fine) |
+
 ## How it works
 
 - In its hello the client announces: the framebuffer geometry

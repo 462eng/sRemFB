@@ -32,6 +32,18 @@ et quand GNOME blanke ses écrans (DPMS transmis).
 - **[PROTOCOL.fr.md](PROTOCOL.fr.md)** — le protocole réseau (v2), champ
   par champ.
 
+## SBC supportés
+
+| SBC | État | Notes |
+|---|---|---|
+| Raspberry Pi 5 / 500 / 500+ | ✅ support complet | parfait à 60 fps, aucun lag |
+| Raspberry Pi 4 / 400 | ✅ supporté | non testé pour le moment |
+| Raspberry Pi 3B+ | ✅ supporté | utilisable à 30 fps, délais en cas d'affichage dynamique |
+| Raspberry Pi 3B | ✅ supporté | non testé pour le moment |
+| Raspberry Pi 2 | ✅ supporté | non testé ; performances réduites attendues (limitation 100 Mbit) |
+| Raspberry Pi 1 | 🟡 support probable | non testé ; performances réduites attendues (limitation 100 Mbit) |
+| Banana Pi M1+ | ✅ supporté | RGB565 recommandé ; limité par sa RAM (vidéos globalement ok) |
+
 ## Fonctionnement
 
 - Le client annonce dans son hello : géométrie du framebuffer
