@@ -6,10 +6,12 @@
  * constant makes the virtual screen get its position back on every plug —
  * like a real monitor, reboots included. The serial derives from the
  * client's MAC address, so each physical client appears as a distinct
- * monitor with its own remembered position. Two detailed timings expose the client's
- * framebuffer size at 60 Hz (preferred) and 30 Hz, so the frame rate can
- * be capped from GNOME's display panel. Physical size is a fixed 24-inch
- * diagonal.
+ * monitor with its own remembered position. Four timings expose the
+ * client's framebuffer size at 60 Hz (preferred), 30 Hz (base block) and
+ * 120/15 Hz (CEA-861 extension — the base block only has two descriptor
+ * slots left), so the frame rate can be picked from GNOME's display
+ * panel: 15 Hz caps the damage traffic for weak links, 120 Hz serves
+ * fast panels. Physical size is a fixed 24-inch diagonal.
  */
 #include <math.h>
 #include <string.h>
@@ -44,7 +46,7 @@ static void put_dtd(uint8_t *d, uint32_t width, uint32_t height,
     d[17] = 0x1E;                          /* digital, separate +h +v sync */
 }
 
-void sremfb_edid_build(uint8_t out[128], uint32_t width, uint32_t height,
+void sremfb_edid_build(uint8_t out[256], uint32_t width, uint32_t height,
                        uint32_t serial, const char model[13])
 {
     /* model name: the client panel's "vendor model" if it sent one
@@ -72,7 +74,7 @@ void sremfb_edid_build(uint8_t out[128], uint32_t width, uint32_t height,
     uint32_t wcm = MIN((wmm + 5) / 10, 255);
     uint32_t hcm = MIN((hmm + 5) / 10, 255);
 
-    memset(e, 0, 128);
+    memset(e, 0, 256);
 
     /* header */
     static const uint8_t magic[8] = { 0x00, 0xFF, 0xFF, 0xFF,
@@ -117,11 +119,11 @@ void sremfb_edid_build(uint8_t out[128], uint32_t width, uint32_t height,
             d[5 + len] = 0x0A;
     }
 
-    /* descriptor 4: display range limits */
+    /* descriptor 4: display range limits (wide enough for 15 and 120 Hz) */
     {
         uint8_t *d = e + 108;
         d[3] = 0xFD;
-        d[5] = 24;  d[6] = 61;             /* vertical 24-61 Hz */
+        d[5] = 14;  d[6] = 121;            /* vertical 14-121 Hz */
         d[7] = 10;  d[8] = 160;            /* horizontal 10-160 kHz */
         d[9] = 60;                         /* max pixel clock 600 MHz */
         d[10] = 0x01;                      /* range limits only */
@@ -129,10 +131,26 @@ void sremfb_edid_build(uint8_t out[128], uint32_t width, uint32_t height,
         memset(d + 12, 0x20, 6);
     }
 
-    /* no extension blocks; checksum makes the byte sum 0 mod 256 */
-    e[126] = 0;
+    /* one CEA-861 extension block; base checksum makes the sum 0 mod 256 */
+    e[126] = 1;
     uint8_t sum = 0;
     for (int i = 0; i < 127; i++)
         sum = (uint8_t)(sum + e[i]);
     e[127] = (uint8_t)(256 - sum);
+
+    /* extension: CEA-861 rev 3 carrying the 120 Hz and 15 Hz timings —
+     * the base block's four descriptor slots are already taken */
+    {
+        uint8_t *x = e + 128;
+        x[0] = 0x02;                       /* CEA-861 tag */
+        x[1] = 0x03;                       /* revision 3 */
+        x[2] = 4;                          /* DTDs start right after header */
+        x[3] = 0x80;                       /* underscan, no native DTD claim */
+        put_dtd(x + 4, width, height, 120, wmm, hmm);
+        put_dtd(x + 22, width, height, 15, wmm, hmm);
+        sum = 0;
+        for (int i = 128; i < 255; i++)
+            sum = (uint8_t)(sum + e[i]);
+        e[255] = (uint8_t)(256 - sum);
+    }
 }

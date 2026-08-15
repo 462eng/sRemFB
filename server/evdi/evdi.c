@@ -382,8 +382,11 @@ static void sremfb_evdi_plug(SremfbClient *c)
 {
     sremfb_edid_build(EV(c)->edid, c->hello.xres, c->hello.yres,
                       client_serial(c), c->hello.model);
-    evdi_connect(EV(c)->dev->handle, EV(c)->edid, sizeof(EV(c)->edid),
-                 (uint32_t)c->hello.xres * c->hello.yres);
+    /* evdi_connect2: the legacy evdi_connect derives the pixel-per-second
+     * limit as area x 60, which silently drops our 120 Hz EDID mode */
+    evdi_connect2(EV(c)->dev->handle, EV(c)->edid, sizeof(EV(c)->edid),
+                  (uint32_t)c->hello.xres * c->hello.yres,
+                  (uint32_t)c->hello.xres * c->hello.yres * 120u);
     EV(c)->plugged = TRUE;
     c->state = SREMFB_CLIENT_MODE_WAIT;
     EV(c)->mode_timeout_id = g_timeout_add_seconds(10, on_mode_timeout, c);

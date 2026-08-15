@@ -33,7 +33,7 @@ typedef struct {
 typedef struct {
     SremfbEvdiDevice *dev;     /* pooled device, NULL when none */
     gboolean plugged;          /* EDID connected (cable "plugged in") */
-    uint8_t edid[128];
+    uint8_t edid[256];
     gboolean mode_valid;
     gboolean grab_registered;
     gboolean update_pending;   /* update requested, update_ready will fire */
@@ -50,7 +50,7 @@ gboolean sremfb_evdi_probe(void);            /* any evdi device present? */
 void     sremfb_evdi_close_all(SremfbServer *srv);
 
 /* edid.c */
-void sremfb_edid_build(uint8_t out[128], uint32_t width, uint32_t height,
+void sremfb_edid_build(uint8_t out[256], uint32_t width, uint32_t height,
                        uint32_t serial, const char model[13]);
 
 #endif /* SREMFB_EVDI_H */
