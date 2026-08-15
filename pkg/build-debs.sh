@@ -5,15 +5,16 @@
 #   sremfb-client_<ver>_armhf.deb         (SBC ARMv7 : Banana Pi M1+, Pi 2…)
 #
 # Le client est lié en STATIQUE avec liblz4 (extraite des paquets Debian
-# de la cible, mises en cache dans pkg/sysroot/) : il ne dépend que de
-# libc6, donc fonctionne tel quel sur Debian, Raspberry Pi OS et Armbian.
+# de la cible, mises en cache dans pkg/sysroot/) et en DYNAMIQUE avec
+# libdrm (sortie DRM/KMS opt-in) : il dépend de libc6 + libdrm2, présents
+# tels quels sur Debian, Raspberry Pi OS et Armbian.
 # Le module noyau n'est pas repackagé : evdi-dkms existe dans Debian et
 # n'est nécessaire que côté serveur (déclaré en dépendance).
 #
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.3.2}
+VERSION=${1:-1.4.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -23,18 +24,24 @@ trap 'rm -rf "$STAGE"' EXIT
 
 mkdir -p "$DIST" "$SYSROOT"
 
-# --- liblz4 statique des cibles (cache) --------------------------------
-fetch_lz4() { # $1 = debian arch
-    if [ ! -e "$SYSROOT/$1"/usr/lib/*/liblz4.a ]; then
-        echo "== téléchargement liblz4-dev:$1"
-        (cd "$SYSROOT" && apt-get download "liblz4-dev:$1" >/dev/null)
+# --- libs des cibles (cache) -------------------------------------------
+# liblz4 en statique ; libdrm en dynamique : le sysroot fournit les
+# en-têtes (libdrm-dev) et le .so (libdrm2 + symlink de libdrm-dev) pour
+# l'édition de liens croisée.
+fetch_pkg() { # $1 = debian arch, $2 = paquet, $3 = glob du fichier attendu
+    if ! ls "$SYSROOT/$1"/$3 >/dev/null 2>&1; then
+        echo "== téléchargement $2:$1"
+        (cd "$SYSROOT" && apt-get download "$2:$1" >/dev/null)
         mkdir -p "$SYSROOT/$1"
-        dpkg -x "$SYSROOT"/liblz4-dev_*_"$1".deb "$SYSROOT/$1"
-        rm -f "$SYSROOT"/liblz4-dev_*_"$1".deb
+        dpkg -x "$SYSROOT/$2"_*_"$1".deb "$SYSROOT/$1"
+        rm -f "$SYSROOT/$2"_*_"$1".deb
     fi
 }
-fetch_lz4 arm64
-fetch_lz4 armhf
+for a in arm64 armhf; do
+    fetch_pkg "$a" liblz4-dev 'usr/lib/*/liblz4.a'
+    fetch_pkg "$a" libdrm2    'usr/lib/*/libdrm.so.2*'
+    fetch_pkg "$a" libdrm-dev 'usr/lib/*/libdrm.so'
+done
 
 # --- binaires -----------------------------------------------------------
 echo "== build serveur (amd64)"
@@ -44,10 +51,13 @@ build_client() { # $1 = debian arch, $2 = triplet gcc
     echo "== build client ($1)"
     "$2-gcc" -O2 -Wall -Wextra -pthread -I"$TOP" \
         -I"$SYSROOT/$1/usr/include" \
+        -I"$SYSROOT/$1/usr/include/libdrm" \
         -o "$STAGE/sremfb-client-$1" \
         "$TOP/client/sremfb-client.c" "$TOP/client/v4l2dec.c" \
         "$TOP/client/usbexport.c" \
-        "$SYSROOT/$1/usr/lib/$2/liblz4.a"
+        "$TOP/client/output_fb.c" "$TOP/client/output_drm.c" \
+        "$SYSROOT/$1/usr/lib/$2/liblz4.a" \
+        -L"$SYSROOT/$1/usr/lib/$2" -ldrm
     "$2-strip" "$STAGE/sremfb-client-$1"
 }
 build_client arm64 aarch64-linux-gnu
@@ -179,18 +189,19 @@ echo "  systemctl enable --now sremfb-client"
 EOF
     chmod 755 "$ROOT/DEBIAN/postinst"
     make_deb sremfb-client "$arch" \
-"Depends: libc6
+"Depends: libc6, libdrm2
 Recommends: usbip
 Conflicts: rfb-client
 Replaces: rfb-client
-Description: sRemFB, écran virtuel réseau — client framebuffer
- Reçoit les frames d'un sremfb-server et les écrit directement dans
- /dev/fb0 ; éteint la dalle quand le serveur est absent ou blanke,
- reflète le débranchement de la dalle, décode le H.264 adaptatif
- en matériel (V4L2 M2M, ex. Pi 3) quand le SBC en dispose, et exporte
- les périphériques USB éligibles vers le serveur (usbip, paquet
- usbip requis pour cette fonction).
- LZ4 lié en statique : aucune autre dépendance obligatoire."
+Description: sRemFB, écran virtuel réseau — client framebuffer/DRM
+ Reçoit les frames d'un sremfb-server et les écrit dans /dev/fb0
+ (défaut) ou en scanout DRM/KMS natif (SREMFB_OUTPUT=drm : modeset
+ legacy, RGB565 ou XRGB8888) ; éteint la dalle quand le serveur est
+ absent ou blanke, reflète le débranchement de la dalle, décode le
+ H.264 adaptatif en matériel (V4L2 M2M, ex. Pi 3) quand le SBC en
+ dispose, et exporte les périphériques USB éligibles vers le serveur
+ (usbip, paquet usbip requis pour cette fonction).
+ LZ4 lié en statique : seules libc6 et libdrm2 sont requises."
 done
 
 echo "== paquets dans $DIST :"

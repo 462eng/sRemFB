@@ -32,15 +32,16 @@ Testé avec libevdi/evdi-dkms **1.14.8** (Debian trixie).
 
 ### Client (SBC)
 
-Seule dépendance de build : `liblz4-dev`.
+Dépendances de build : `liblz4-dev` et `libdrm-dev`.
 
 ```sh
-sudo apt install build-essential liblz4-dev
+sudo apt install build-essential liblz4-dev libdrm-dev
 ```
 
-Le client est volontairement du C pur : pas de GLib, pas de DRM, rien
-d'autre que la libc et lz4 — le décodage H.264 matériel optionnel passe
-par de purs ioctls V4L2 contre les en-têtes UAPI du noyau. Il compile
+Le client est volontairement du C pur : pas de GLib, rien d'autre que
+la libc, lz4 et libdrm (sortie DRM/KMS opt-in, `SREMFB_OUTPUT=drm`) —
+le décodage H.264 matériel optionnel passe par de purs ioctls V4L2
+contre les en-têtes UAPI du noyau. Il compile
 tel quel sur Debian, Raspberry Pi OS et Armbian.
 
 ## Build local
@@ -111,16 +112,18 @@ cibles d'installation.
 | `sremfb-client` | armhf | SBC ARMv7 (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.3.2 par défaut
+./pkg/build-debs.sh              # version 1.4.0 par défaut
 ./pkg/build-debs.sh 3.1.0        # version explicite
 ```
 
 Détails :
 
-- **Client lié statiquement à lz4.** Le script télécharge `liblz4-dev`
-  pour chaque architecture cible (`apt-get download`, mis en cache dans
-  `pkg/sysroot/`) et lie `liblz4.a` en dur. Le paquet client ne dépend
-  donc que de `libc6` — aucune contrainte de version lz4 sur la cible.
+- **Client lié statiquement à lz4, dynamiquement à libdrm.** Le script
+  télécharge `liblz4-dev`, `libdrm2` et `libdrm-dev` pour chaque
+  architecture cible (`apt-get download`, mis en cache dans
+  `pkg/sysroot/`), lie `liblz4.a` en dur et `libdrm.so` en dynamique.
+  Le paquet client dépend de `libc6` et `libdrm2` — aucune contrainte
+  de version lz4 sur la cible.
 - **Cross-compilation** du client : nécessite les toolchains
   `gcc-aarch64-linux-gnu` et `gcc-arm-linux-gnueabihf`, et les
   architectures `arm64`/`armhf` activées dans dpkg pour `apt-get
@@ -151,9 +154,9 @@ surchargez-le via la variable d'environnement `MAINT`
 
 ```sh
 # serveur
-sudo apt install ./dist/sremfb-server_1.3.2_amd64.deb
+sudo apt install ./dist/sremfb-server_1.4.0_amd64.deb
 # client (sur le SBC)
-sudo apt install ./dist/sremfb-client_1.3.2_arm64.deb
+sudo apt install ./dist/sremfb-client_1.4.0_arm64.deb
 ```
 
 Sur une conf déjà modifiée, `dpkg -i --force-confold` conserve le fichier

@@ -132,7 +132,12 @@ l'écran « se débranche ».
 | `SREMFB_PORT` (serveur & client) | 4629 | port TCP |
 | `SREMFB_ALLOW` (serveur) | — | plages IPv4 autorisées, CIDR séparés par virgules (vide = tout accepter) ; `/etc/sremfb-server.conf` |
 | `SREMFB_SERVER` (client) | — | hôte/IP du serveur (requis) |
-| `SREMFB_FBDEV` (client) | `/dev/fb0` | device framebuffer |
+| `SREMFB_OUTPUT` (client) | `fb` | `fb` (framebuffer) ou `drm` (scanout KMS natif : modeset legacy, RGB565 par défaut) |
+| `SREMFB_FBDEV` (client) | `/dev/fb0` | device framebuffer (sortie `fb`) |
+| `SREMFB_DRM_CARD` (client) | auto | `/dev/dri/cardN` (sortie `drm` ; auto = 1ᵉ carte avec connecteur branché) |
+| `SREMFB_DRM_CONNECTOR` (client) | 1ᵉ branché | ex. `HDMI-A-1` (sortie `drm`) |
+| `SREMFB_DRM_MODE` (client) | preferred | `1920x1080` pour forcer (sortie `drm`) |
+| `SREMFB_DRM_DEPTH` (client) | 16 | `32` pour scanout XRGB8888 (sortie `drm` ; repli automatique si RGB565 non supporté) |
 | `SREMFB_TTY` (client) | `/dev/tty1` | VT prise en main (avant-plan + mode graphique) ; en préférer une sans getty, ex. `/dev/tty7` |
 | `SREMFB_WRITE_MODE` (client) | `mmap` | `pwrite` si l'affichage traîne (deferred-io) |
 | `SREMFB_MAC` (client) | auto | forcer le MAC annoncé (= identité du moniteur) |

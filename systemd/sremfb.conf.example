@@ -2,7 +2,16 @@
 # Address of the PC running sremfb-server on the dedicated LAN (required)
 SREMFB_SERVER=192.0.2.1
 # SREMFB_PORT=4629
+# Output backend: fb (default, /dev/fb0) or drm (native KMS scanout,
+# RGB565 by default — no kernel cmdline/fbdev depth tweak needed):
+# SREMFB_OUTPUT=drm
 # SREMFB_FBDEV=/dev/fb0
+# DRM output tuning (drm only; defaults: first connected card/connector,
+# preferred mode, 16 bpp with automatic XRGB8888 fallback):
+# SREMFB_DRM_CARD=/dev/dri/card0
+# SREMFB_DRM_CONNECTOR=HDMI-A-1
+# SREMFB_DRM_MODE=1920x1080
+# SREMFB_DRM_DEPTH=32
 # VT taken over by the client (switched to foreground + graphics mode);
 # prefer one with no getty to avoid a stray console cursor, e.g. tty7:
 # SREMFB_TTY=/dev/tty7

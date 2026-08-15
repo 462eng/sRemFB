@@ -133,7 +133,12 @@ screen "unplugs".
 | `SREMFB_PORT` (server & client) | 4629 | TCP port |
 | `SREMFB_ALLOW` (server) | — | allowed IPv4 ranges, comma-separated CIDRs (empty = accept everything); `/etc/sremfb-server.conf` |
 | `SREMFB_SERVER` (client) | — | server host/IP (required) |
-| `SREMFB_FBDEV` (client) | `/dev/fb0` | framebuffer device |
+| `SREMFB_OUTPUT` (client) | `fb` | `fb` (framebuffer) or `drm` (native KMS scanout: legacy modeset, RGB565 by default) |
+| `SREMFB_FBDEV` (client) | `/dev/fb0` | framebuffer device (`fb` output) |
+| `SREMFB_DRM_CARD` (client) | auto | `/dev/dri/cardN` (`drm` output; auto = first card with a connected output) |
+| `SREMFB_DRM_CONNECTOR` (client) | first connected | e.g. `HDMI-A-1` (`drm` output) |
+| `SREMFB_DRM_MODE` (client) | preferred | `1920x1080` to force (`drm` output) |
+| `SREMFB_DRM_DEPTH` (client) | 16 | `32` for XRGB8888 scanout (`drm` output; automatic fallback when RGB565 is unsupported) |
 | `SREMFB_TTY` (client) | `/dev/tty1` | VT taken over (foreground + graphics mode); use one with no getty, e.g. `/dev/tty7` |
 | `SREMFB_WRITE_MODE` (client) | `mmap` | `pwrite` if the display lags (deferred-io) |
 | `SREMFB_MAC` (client) | auto | override the announced MAC (= monitor identity) |
