@@ -420,15 +420,38 @@ static void sremfb_evdi_unplug(SremfbClient *c)
 
 /* ------------------------------------------------------ device setup */
 
-/* Best-effort at startup: recreate fresh evdi devices. A server restart
- * closes/reopens the devices, and mutter does not survive that (EBUSY on
- * reopen, hotplugs then ignored on the card — the quarantine above is
- * the runtime fallback); brand-new devices avoid the bug entirely.
- * Needs write access to /sys/devices/evdi/{remove_all,add}: the udev
- * rule shipped with the package hands them to group "video". Skipped if
- * another process (second server instance) holds an evdi device. */
+/* Cold-boot only: recreate fresh evdi devices so the compositor gets
+ * brand-new cards (it does not survive a close/reopen of a card it was
+ * already driving — EBUSY on reopen, hotplugs then ignored; the
+ * quarantine above is the runtime fallback).
+ *
+ * Crucially this must NOT run on a mid-session *restart*: by then the
+ * compositor (gnome-shell / Xwayland) holds every evdi /dev/dri/cardN
+ * open, and remove_all here removes the card from under it, forcing a
+ * reopen that wedges mutter. A per-session marker in $XDG_RUNTIME_DIR
+ * (tmpfs: gone on logout and reboot, kept across a daemon restart within
+ * the same session) tells the two apart — on a restart we keep the
+ * devices in place. It lives there, not in /run, because the server runs
+ * as the session user and cannot write /run; and $XDG_RUNTIME_DIR being
+ * cleared on relogin is correct — a fresh session gets a fresh mutter, so
+ * the reset is safe again. The flock probe only catches a second *server*
+ * instance, not the compositor, so it cannot stand in for this.
+ *
+ * Needs write access to /sys/devices/evdi/{remove_all,add}: the udev rule
+ * shipped with the package hands them to group "video". */
 void sremfb_evdi_reset(unsigned count)
 {
+    const char *rundir = getenv("XDG_RUNTIME_DIR");
+    char marker[256];
+
+    g_snprintf(marker, sizeof(marker), "%s/sremfb-evdi-reset",
+               rundir && *rundir ? rundir : "/run");
+    if (g_file_test(marker, G_FILE_TEST_EXISTS)) {
+        g_message("evdi reset skipped: restart (keeping the devices the "
+                  "compositor already holds open)");
+        return;
+    }
+
     for (int i = 0; i < 32; i++) {
         char path[32];
         if (evdi_check_device(i) != AVAILABLE)
@@ -466,6 +489,9 @@ void sremfb_evdi_reset(unsigned count)
     close(afd);
     g_usleep(300 * 1000);
     g_message("evdi devices reset: %u fresh device(s)", count);
+    /* Mark the cold-boot reset as done so a later restart keeps the
+     * compositor's devices instead of wedging it. */
+    g_file_set_contents(marker, "", 0, NULL);
 }
 
 gboolean sremfb_evdi_probe(void)

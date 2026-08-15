@@ -46,24 +46,38 @@ int main(int argc, char **argv)
      * parameter (what a boot would create) — the *runtime* count is not
      * trustworthy: self-heal leftovers inflate it, an external
      * remove_all deflates it. */
+    unsigned n = 2;
     {
         gchar *cnt = NULL;
-        unsigned n = 2;
         if (g_file_get_contents(
                 "/sys/module/evdi/parameters/initial_device_count",
                 &cnt, NULL, NULL)) {
             n = (unsigned)CLAMP(atoi(cnt), 1, 16);
             g_free(cnt);
         }
-        sremfb_evdi_reset(n);
     }
+    sremfb_evdi_reset(n);
 
-    if (!sremfb_evdi_probe()) {
-        g_printerr("no evdi device — load the module first (modprobe evdi, "
-                   "package evdi-dkms; initial_device_count in "
-                   "/etc/modprobe.d/sremfb.conf sets how many screens can "
-                   "connect at once)\n");
-        return 1;
+    /* Cold-boot race: the evdi module and its /sys permissions
+     * (sremfb-evdi-perms.service, a *system* unit) may not be ready when
+     * we start — we are After=graphical-session.target, they are not.
+     * Waiting for them here, instead of exiting into a Restart=always
+     * crash loop, keeps a single process patient and re-runs the reset
+     * once the permissions become writable. Bounded, so a genuinely
+     * missing module still fails cleanly. */
+    for (int waited = 0; !sremfb_evdi_probe(); waited++) {
+        if (waited == 0)
+            g_message("no evdi device yet — waiting for the module and its "
+                      "permissions (evdi-dkms + sremfb-evdi-perms)");
+        if (waited >= 60) {
+            g_printerr("no evdi device after 60s — load the module first "
+                       "(modprobe evdi, package evdi-dkms; "
+                       "initial_device_count in /etc/modprobe.d/sremfb.conf "
+                       "sets how many screens can connect at once)\n");
+            return 1;
+        }
+        g_usleep(1000 * 1000);         /* 1 s */
+        sremfb_evdi_reset(n);          /* retry once the perms are up */
     }
 
     evdi.devices = g_ptr_array_new();
