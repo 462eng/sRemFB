@@ -190,14 +190,17 @@ comme fbdev le fait via `FBIOGET_VSCREENINFO`.
    repli XR24 ; blank par DPMS confirmé sur vc4.*
    **✅ VALIDÉ 2026-08-15** (client 1.4.0 en prod DRM) : card1/vc4 auto
    (card0/v3d sauté), scanout RG16 natif, hello 16bpp pixfmt 1, hotplug
-   armé, USB intact, rendu « parfait » (visuel). **Reste : le page-flip**
-   (C1.3) — inexerçable sur Milim : le Pi 500 n'a pas de décodeur H.264
-   (`h264=n`, seul chemin plein écran systématique) et le trim
-   anti-frame-fantôme du serveur fait qu'un rect RAW exactement plein
-   écran ne circule pratiquement jamais (le plein écran de connexion
-   arrive en bandes de damage mutter). → à valider sur **Aqua** (Pi 3,
-   décodeur V4L2 : chaque frame décodée page-flip) dès qu'elle est
-   rallumée.
+   armé, USB intact, rendu « parfait » (visuel).
+   **✅ Page-flip (C1.3) VALIDÉ le même soir** sur le chemin RAW : vidéo
+   plein écran (mpv testsrc sur le moniteur Milim) → `page-flip active`
+   au premier rect exactement 1920x1080+0+0, re-flips sur les frames
+   pleines suivantes, et les rects presque-pleins (trim serveur : rognés
+   de 3-16 lignes) passent bien en écriture en place. Répartition
+   sélective conforme, zéro erreur/repli. Note : le trim
+   anti-frame-fantôme rend le rect exactement plein écran rare en damage
+   ordinaire (la top bar ne change pas → y1>0) — le flip sert surtout
+   les transitions plein écran et, à terme, chaque frame H.264 décodée
+   (à confirmer sur Aqua/Pi 3 quand elle reviendra).
 2. **A20 (Banana Pi M1 / Cubieboard, sun4i, kernel patché)** : même test,
    **legacy modeset validé** sur sun4i (dumb buffers, page-flip, DPMS,
    format RGB565 ou repli XRGB8888). C'est le test de compat critique.
