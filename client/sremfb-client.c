@@ -229,6 +229,14 @@ static void blit_stream_row(unsigned sx, unsigned sy, unsigned w,
                          row + (size_t)skip * C.bytespp, w);
 }
 
+/* Hint the output before a write batch: full=1 = the batch rewrites the
+ * whole stream rect (drm buffers it and page-flips — tear-free). */
+static void out_begin(int full)
+{
+    if (!C.test_mode && C.out.ops->begin)
+        C.out.ops->begin(&C.out, full);
+}
+
 /* Publish the frame just written (page-flip on drm, no-op on fb). */
 static void out_present(void)
 {
@@ -364,6 +372,7 @@ static void frame_to_fb(const struct v4l2dec_frame *f)
     unsigned w = f->w < C.stream_w ? f->w : C.stream_w;
     unsigned h = f->h < C.stream_h ? f->h : C.stream_h;
 
+    out_begin(1);              /* decoded frames cover the whole stream */
     if (f->fourcc == V4L2_PIX_FMT_RGB565 && C.bytespp == 2) {
         for (unsigned y = 0; y < h; y++)
             blit_stream_row(0, y, w, f->data + (size_t)y * f->stride);
@@ -920,6 +929,11 @@ static void frame_loop(int fd)
             break;
         }
         size_t rect_bytes = (size_t)hdr.w * hdr.h * bytespp;
+
+        /* a rect covering the whole stream (connect/H.264-exit snapshot,
+         * full-screen damage) gets the tear-free page-flip path */
+        out_begin(hdr.x == 0 && hdr.y == 0 &&
+                  hdr.w == C.stream_w && hdr.h == C.stream_h);
 
         if (hdr.encoding == SREMFB_ENC_RAW) {
             if (hdr.payload_len != rect_bytes) {

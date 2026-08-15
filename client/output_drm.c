@@ -3,10 +3,16 @@
  *
  * Legacy modeset only (drmModeSetCrtc) — no atomic — for the widest driver
  * compatibility (vc4, and Allwinner sun4i on the A20/Banana Pi, whose
- * kernel is older/patched). A single dumb buffer is scanned out and
- * written in place, exactly like the fb mmap path: partial RAW damage
- * rects land naturally and there is no page-flip to reconcile (tear-free
- * page-flipping for the full-frame H.264 path is a later enhancement).
+ * kernel is older/patched).
+ *
+ * Two dumb buffers, selective page-flip: partial RAW damage rects are
+ * written in place into the scanout buffer (like the fb mmap path —
+ * nothing to reconcile), while full-frame batches (H.264 frames,
+ * full-frame RAW/LZ4 snapshots) go to the back buffer and are published
+ * with a page-flip — tear-free. The back buffer only ever receives full
+ * frames, so it never leaks stale content; the centering borders are
+ * black in both buffers from open(). If the second buffer or the flip
+ * is unavailable, we degrade to the single-buffer in-place behaviour.
  *
  * The client picks the scanout format here, so a panel gets RGB565
  * (half the memory bandwidth and half the wire bytes, dithered by the
@@ -27,6 +33,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <linux/kd.h>
@@ -68,13 +75,20 @@ static const char *conn_type_name(uint32_t t)
     }
 }
 
+struct drmbuf {
+    uint32_t fb_id, handle;
+    uint8_t *map;
+    size_t size;
+};
+
 struct drmpriv {
     int fd;
-    uint32_t conn_id, crtc_id, fb_id, handle;
+    uint32_t conn_id, crtc_id;
     drmModeModeInfo mode;
     drmModeCrtc *saved;        /* to restore on close */
-    uint8_t *map;
-    size_t map_size;
+    struct drmbuf buf[2];      /* [1].map == NULL => single-buffer mode */
+    int front, target;         /* scanout index, current write index */
+    int no_flip;               /* flip broken/unavailable: stay in place */
     unsigned stride, bytespp;
     uint32_t dpms_prop;
     char sys_status[128];      /* /sys/class/drm/card<N>-<conn>/status */
@@ -130,8 +144,19 @@ static uint32_t find_crtc(int fd, drmModeRes *res, drmModeConnector *conn)
     return 0;
 }
 
-/* Bring up scanout with one format; returns 0 on success. */
-static int setup_fb(uint32_t fourcc, uint32_t bpp)
+static void destroy_buf(struct drmbuf *b)
+{
+    if (b->map)
+        munmap(b->map, b->size);
+    if (b->fb_id)
+        drmModeRmFB(D.fd, b->fb_id);
+    if (b->handle)
+        drmModeDestroyDumbBuffer(D.fd, b->handle);
+    memset(b, 0, sizeof(*b));
+}
+
+/* Allocate one dumb buffer + framebuffer, mmap it, paint it black. */
+static int create_buf(uint32_t fourcc, uint32_t bpp, struct drmbuf *b)
 {
     uint32_t handle, pitch, fb_id;
     uint64_t size, off;
@@ -160,18 +185,31 @@ static int setup_fb(uint32_t fourcc, uint32_t bpp)
         return -1;
     }
     memset(map, 0, size);
-    if (drmModeSetCrtc(D.fd, D.crtc_id, fb_id, 0, 0, &D.conn_id, 1, &D.mode)) {
-        munmap(map, size);
-        drmModeRmFB(D.fd, fb_id);
-        drmModeDestroyDumbBuffer(D.fd, handle);
-        return -1;
-    }
-    D.fb_id = fb_id;
-    D.handle = handle;
-    D.map = map;
-    D.map_size = size;
+    b->fb_id = fb_id;
+    b->handle = handle;
+    b->map = map;
+    b->size = size;
     D.stride = pitch;
     D.bytespp = bpp / 8;
+    return 0;
+}
+
+/* Bring up scanout with one format; returns 0 on success. The second
+ * buffer (page-flip) is best-effort: without it we just write in place. */
+static int setup_fb(uint32_t fourcc, uint32_t bpp)
+{
+    if (create_buf(fourcc, bpp, &D.buf[0]))
+        return -1;
+    if (drmModeSetCrtc(D.fd, D.crtc_id, D.buf[0].fb_id, 0, 0,
+                       &D.conn_id, 1, &D.mode)) {
+        destroy_buf(&D.buf[0]);
+        return -1;
+    }
+    D.front = D.target = 0;
+    if (create_buf(fourcc, bpp, &D.buf[1])) {
+        dlog("no second dumb buffer: full frames won't page-flip");
+        D.no_flip = 1;
+    }
     return 0;
 }
 
@@ -303,24 +341,85 @@ static int drm_open(struct sremfb_output *o, unsigned *w, unsigned *h,
     return 0;
 }
 
+/* Full-frame batches target the back buffer (flipped by present());
+ * partial damage writes in place into the scanout buffer. */
+static void drm_begin(struct sremfb_output *o, int full)
+{
+    (void)o;
+    D.target = (full && !D.no_flip) ? !D.front : D.front;
+}
+
 static void drm_write_row(struct sremfb_output *o, unsigned dx, unsigned dy,
                           const uint8_t *src, unsigned npix)
 {
     (void)o;
-    memcpy(D.map + (size_t)dy * D.stride + (size_t)dx * D.bytespp,
-           src, (size_t)npix * D.bytespp);
+    memcpy(D.buf[D.target].map + (size_t)dy * D.stride +
+           (size_t)dx * D.bytespp, src, (size_t)npix * D.bytespp);
+}
+
+/* The user data handed to drmModePageFlip() comes back here via
+ * drmHandleEvent() when the flip lands (vblank). */
+static void flip_done(int fd, unsigned seq, unsigned sec, unsigned usec,
+                      void *data)
+{
+    (void)fd; (void)seq; (void)sec; (void)usec;
+    *(int *)data = 1;
+}
+
+/* Wait for the scheduled flip to land so the ex-front buffer can be
+ * rewritten. Bounded: a stuck driver degrades, it doesn't hang us. */
+static int wait_flip(int *done)
+{
+    drmEventContext ev = { .version = 2, .page_flip_handler = flip_done };
+
+    for (int tries = 0; !*done && tries < 10; tries++) {
+        struct pollfd p = { .fd = D.fd, .events = POLLIN };
+        if (poll(&p, 1, 100) <= 0)
+            continue;
+        drmHandleEvent(D.fd, &ev);
+    }
+    return *done ? 0 : -1;
 }
 
 static void drm_present(struct sremfb_output *o)
 {
-    (void)o;                   /* single buffer: writes are already scanned out */
+    int done = 0;
+
+    (void)o;
+    if (D.target == D.front)
+        return;                /* in-place writes are already scanned out */
+    if (drmModePageFlip(D.fd, D.crtc_id, D.buf[D.target].fb_id,
+                        DRM_MODE_PAGE_FLIP_EVENT, &done) == 0) {
+        static int announced;
+        if (wait_flip(&done) < 0) {
+            dlog("page-flip event lost — falling back to in-place writes");
+            D.no_flip = 1;     /* the flip itself was queued: swap anyway */
+        } else if (!announced) {
+            announced = 1;
+            dlog("page-flip active (tear-free full frames)");
+        }
+        D.front = D.target;
+        return;
+    }
+    /* flip refused (driver quirk): blocking modeset to the new buffer,
+     * and if even that fails, degrade to single-buffer for good */
+    if (drmModeSetCrtc(D.fd, D.crtc_id, D.buf[D.target].fb_id, 0, 0,
+                       &D.conn_id, 1, &D.mode) == 0) {
+        D.front = D.target;
+    } else {
+        dlog("page-flip unavailable (%s) — falling back to in-place writes",
+             strerror(errno));
+        D.no_flip = 1;
+        D.target = D.front;
+    }
 }
 
 static void drm_clear(struct sremfb_output *o)
 {
     (void)o;
-    if (D.map)
-        memset(D.map, 0, D.map_size);
+    for (int i = 0; i < 2; i++)
+        if (D.buf[i].map)
+            memset(D.buf[i].map, 0, D.buf[i].size);
 }
 
 static void drm_blank(struct sremfb_output *o, int on)
@@ -329,8 +428,8 @@ static void drm_blank(struct sremfb_output *o, int on)
     if (D.dpms_prop)
         drmModeConnectorSetProperty(D.fd, D.conn_id, D.dpms_prop,
                                     on ? DRM_MODE_DPMS_OFF : DRM_MODE_DPMS_ON);
-    else if (on && D.map)
-        memset(D.map, 0, D.map_size);   /* no DPMS: paint black */
+    else if (on && D.buf[D.front].map)
+        memset(D.buf[D.front].map, 0, D.buf[D.front].size); /* no DPMS: black */
 }
 
 /* Panel connected? Read the connector's sysfs status (cheap, no probe). */
@@ -393,14 +492,8 @@ static void drm_close(struct sremfb_output *o)
         drmModeFreeCrtc(D.saved);
         D.saved = NULL;
     }
-    if (D.map) {
-        munmap(D.map, D.map_size);
-        D.map = NULL;
-    }
-    if (D.fb_id)
-        drmModeRmFB(D.fd, D.fb_id);
-    if (D.handle)
-        drmModeDestroyDumbBuffer(D.fd, D.handle);
+    destroy_buf(&D.buf[0]);
+    destroy_buf(&D.buf[1]);
     if (D.fd >= 0) {
         drmDropMaster(D.fd);
         close(D.fd);
@@ -415,6 +508,7 @@ static void drm_close(struct sremfb_output *o)
 const struct sremfb_output_ops sremfb_output_drm = {
     .name = "drm",
     .open = drm_open,
+    .begin = drm_begin,
     .write_row = drm_write_row,
     .present = drm_present,
     .clear = drm_clear,

@@ -188,6 +188,16 @@ comme fbdev le fait via `FBIOGET_VSCREENINFO`.
    supporte `RG16` (RGB565) ET `XR24` (XRGB8888) en **LINEAR**, propriété
    **DPMS** présente, mode préféré 1920x1080@60. → format primaire RG16,
    repli XR24 ; blank par DPMS confirmé sur vc4.*
+   **✅ VALIDÉ 2026-08-15** (client 1.4.0 en prod DRM) : card1/vc4 auto
+   (card0/v3d sauté), scanout RG16 natif, hello 16bpp pixfmt 1, hotplug
+   armé, USB intact, rendu « parfait » (visuel). **Reste : le page-flip**
+   (C1.3) — inexerçable sur Milim : le Pi 500 n'a pas de décodeur H.264
+   (`h264=n`, seul chemin plein écran systématique) et le trim
+   anti-frame-fantôme du serveur fait qu'un rect RAW exactement plein
+   écran ne circule pratiquement jamais (le plein écran de connexion
+   arrive en bandes de damage mutter). → à valider sur **Aqua** (Pi 3,
+   décodeur V4L2 : chaque frame décodée page-flip) dès qu'elle est
+   rallumée.
 2. **A20 (Banana Pi M1 / Cubieboard, sun4i, kernel patché)** : même test,
    **legacy modeset validé** sur sun4i (dumb buffers, page-flip, DPMS,
    format RGB565 ou repli XRGB8888). C'est le test de compat critique.

@@ -26,15 +26,25 @@ struct sremfb_output_ops {
     int  (*open)(struct sremfb_output *o, unsigned *w, unsigned *h,
                  uint8_t *pixfmt, unsigned *bytespp);
 
+    /* Optional hint before a write batch. full=1 means the batch rewrites
+     * the whole stream rect (H.264 frame, full-frame RAW/LZ4 snapshot):
+     * drm targets its back buffer and present() page-flips — tear-free.
+     * full=0 (partial damage) writes in place into the scanout buffer,
+     * like fb. The back buffer only ever receives full frames, so no
+     * stale-region reconciliation is needed. NULL = backend doesn't
+     * double-buffer (fb). */
+    void (*begin)(struct sremfb_output *o, int full);
+
     /* Write `npix` pixels (already in the panel pixfmt) at panel position
-     * (dx,dy) into the current back buffer. The caller has clipped it to
+     * (dx,dy) into the current write target. The caller has clipped it to
      * [0,w) x [0,h). */
     void (*write_row)(struct sremfb_output *o, unsigned dx, unsigned dy,
                       const uint8_t *src, unsigned npix);
 
-    /* Publish what was written since the last present (drm: page-flip;
-     * fb: no-op — writes are already visible). Called after a full frame
-     * for H.264, and may be called per damage batch for RAW. */
+    /* Publish what was written since the last present (drm: page-flip if
+     * the batch targeted the back buffer; fb: no-op — writes are already
+     * visible). Called after a full frame for H.264, and per damage rect
+     * for RAW. */
     void (*present)(struct sremfb_output *o);
 
     void (*clear)(struct sremfb_output *o);            /* paint black */
