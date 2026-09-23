@@ -222,6 +222,17 @@ position).
 > and plugs it immediately — mutter only accepts a card for a few
 > seconds after its creation (bounded budget; if it runs out, a session
 > re-login clears mutter).
+>
+> One case remains outside the server's reach: at boot, `evdi` is loaded
+> with its initial devices *before* GDM, so gnome-shell grabs them when
+> the session opens, and the server's first startup then regenerates them
+> from under mutter — the wedge from the very first second ("compositor
+> did not light up the connector within 10s" in a loop). Hence a GDM
+> drop-in, `gdm.service.d/sremfb-evdi-purge.conf`, installed by the package
+> and by `make install-server`, which purges the EVDI devices before GDM
+> starts: the server then creates fresh cards that mutter discovers at
+> hotplug. It takes effect on the next GDM restart (`systemctl restart
+> gdm3`, or reboot) — a plain re-login is not enough.
 
 ## Notes
 

@@ -13,7 +13,7 @@
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download.
 
-VERSION=${1:-1.3.3}
+VERSION=${1:-1.4.1}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -74,6 +74,7 @@ EOF
 ROOT=$STAGE/server
 mkdir -p "$ROOT/usr/bin" "$ROOT/usr/libexec" "$ROOT/usr/lib/systemd/user" \
          "$ROOT/usr/lib/systemd/system" "$ROOT/usr/lib/tmpfiles.d" \
+         "$ROOT/usr/lib/systemd/system/gdm.service.d" \
          "$ROOT/usr/lib/udev/hwdb.d" "$ROOT/usr/lib/udev/rules.d" \
          "$ROOT/etc/modules-load.d" "$ROOT/etc/modprobe.d"
 install -m 755 "$TOP/server/sremfb-server" "$ROOT/usr/bin/sremfb-server"
@@ -82,6 +83,8 @@ sed 's|/usr/local/bin|/usr/bin|' "$TOP/systemd/sremfb-server.service" \
     > "$ROOT/usr/lib/systemd/user/sremfb-server.service"
 install -m 644 "$TOP/systemd/sremfb-evdi-perms.service" \
     "$ROOT/usr/lib/systemd/system/sremfb-evdi-perms.service"
+install -m 644 "$TOP/systemd/gdm-sremfb-evdi-purge.conf" \
+    "$ROOT/usr/lib/systemd/system/gdm.service.d/sremfb-evdi-purge.conf"
 install -m 755 "$TOP/systemd/sremfb-usb-attach" \
     "$ROOT/usr/libexec/sremfb-usb-attach"
 sed 's|/usr/local/libexec|/usr/libexec|' "$TOP/systemd/sremfb-usb.service" \

@@ -222,6 +222,17 @@ indépendante).
 > l'acquisition et le branche immédiatement — mutter n'accepte une carte
 > que quelques secondes après sa création (budget borné ; épuisé, une
 > reconnexion de session remet mutter d'aplomb).
+>
+> Un cas échappe au serveur : au boot, `evdi` est chargé avec ses devices
+> initiaux *avant* GDM, donc gnome-shell les saisit à l'ouverture de
+> session, et le premier démarrage du serveur les régénère ensuite sous
+> les pieds de mutter — grippage dès la première seconde (« compositor
+> did not light up the connector within 10s » en boucle). D'où un drop-in
+> GDM, `gdm.service.d/sremfb-evdi-purge.conf`, posé par le paquet et par
+> `make install-server`, qui purge les devices EVDI avant le démarrage de
+> GDM : le serveur crée alors des cartes neuves que mutter découvre à
+> chaud. Il prend effet au prochain redémarrage de GDM (`systemctl restart
+> gdm3`, ou reboot) — une simple reconnexion de session ne suffit pas.
 
 ## Notes
 

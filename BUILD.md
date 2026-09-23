@@ -69,6 +69,10 @@ Installs:
   the graphical session, not as a system service);
 - `/etc/modules-load.d/sremfb.conf` and `/etc/modprobe.d/sremfb.conf`
   (loads `evdi` at boot with `initial_device_count=2`);
+- the GDM drop-in `/etc/systemd/system/gdm.service.d/sremfb-evdi-purge.conf`
+  (purges the EVDI devices before GDM starts, so that mutter never holds
+  a card the server regenerates — see [README.md](README.md), "Multiple
+  screens");
 - the hwdb `61-sremfb-display-vendor.hwdb` (EDID vendor label);
 - the udev rule `60-sremfb-evdi.rules` (`video` group rights on EVDI
   device creation — see [README.md](README.md), "Multiple screens");
@@ -109,7 +113,7 @@ targets.
 | `sremfb-client` | armhf | ARMv7 SBC (Banana Pi M1+, Pi 2, etc.) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.3.3 by default
+./pkg/build-debs.sh              # version 1.4.1 by default
 ./pkg/build-debs.sh 3.1.0        # explicit version
 ```
 
@@ -148,9 +152,9 @@ override it with the `MAINT` environment variable
 
 ```sh
 # server
-sudo apt install ./dist/sremfb-server_1.3.3_amd64.deb
+sudo apt install ./dist/sremfb-server_1.4.1_amd64.deb
 # client (on the SBC)
-sudo apt install ./dist/sremfb-client_1.3.3_arm64.deb
+sudo apt install ./dist/sremfb-client_1.4.1_arm64.deb
 ```
 
 On an already-modified config, `dpkg -i --force-confold` keeps the

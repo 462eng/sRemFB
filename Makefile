@@ -28,6 +28,8 @@ install-server: server-build
 		$(DESTDIR)/etc/udev/rules.d/60-sremfb-evdi.rules
 	install -D -m 644 systemd/sremfb-evdi-perms.service \
 		$(DESTDIR)/etc/systemd/system/sremfb-evdi-perms.service
+	install -D -m 644 systemd/gdm-sremfb-evdi-purge.conf \
+		$(DESTDIR)/etc/systemd/system/gdm.service.d/sremfb-evdi-purge.conf
 	install -D -m 755 systemd/sremfb-usb-attach \
 		$(DESTDIR)$(PREFIX)/libexec/sremfb-usb-attach
 	install -D -m 644 systemd/sremfb-usb.service \
