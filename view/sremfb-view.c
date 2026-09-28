@@ -905,7 +905,7 @@ static int test_step(void)
  * local compositor and scanout, and the monitor's own lag.
  */
 #define LAT_TIMEOUT_MS   1000
-#define LAT_SETTLE_MS    2000
+#define LAT_SETTLE_MS    60000     /* max wait for the probe */
 
 enum { LAT_KEY, LAT_ABS, LAT_REL };
 
@@ -919,7 +919,7 @@ static struct {
     Uint64 phase_ms;
     uint64_t t0_ns;
     int toggle;
-    Uint64 connected_since;
+    Uint64 click_ms;
 } LAT = { .px = -1, .py = -1 };
 
 static void lat_send(void)
@@ -996,27 +996,57 @@ static int lat_step(void)
                                            pointer in the probe window */
         LAT.phase = 1;
         LAT.phase_ms = now;
+        LAT.click_ms = now + 1000;      /* devices: let libinput add them */
         in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X, (int)w / 4);
         in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, (int)h / 4);
         in_syn(SREMFB_INDEV_POINTER);
         in_flush();
-        view_log("latency: %u trials (%s), probe pixel %d,%d — settling",
+        view_log("latency: %u trials (%s), probe pixel %d,%d — waiting "
+                 "for the probe",
                  LAT.n, LAT.kind == LAT_KEY ? "key" :
                  LAT.kind == LAT_ABS ? "absolute pointer" : "relative mouse",
                  px, py);
         return 0;
-    case 1:
-        if (now - LAT.phase_ms < LAT_SETTLE_MS)
+    case 1:                             /* wait for the probe: click it
+                                           once a second until it flips
+                                           (proves it runs, gives it the
+                                           focus for the key test) */
+        pthread_mutex_lock(&FB.lock);
+        if (FB.probe_hit_ns) {
+            FB.probe_hit_ns = 0;
+            pthread_mutex_unlock(&FB.lock);
+            view_log("latency: probe answered, measuring");
+            LAT.phase = 2;
+            LAT.phase_ms = now + 500;
             return 0;
-        if (LAT.kind == LAT_KEY) {      /* give the probe the focus */
+        }
+        pthread_mutex_unlock(&FB.lock);
+        if (now - LAT.phase_ms > LAT_SETTLE_MS) {
+            view_log("latency: no probe on the virtual screen after %d s "
+                     "(start sremfb-latency-probe there)",
+                     LAT_SETTLE_MS / 1000);
+            return 1;
+        }
+        if (now >= LAT.click_ms) {
+            LAT.click_ms = now + 1000;
+            pthread_mutex_lock(&FB.lock);
+            FB.probe_x = (unsigned)px;
+            FB.probe_y = (unsigned)py;
+            FB.probe_base = view_fb_pixel(&FB, (unsigned)px, (unsigned)py);
+            FB.probe_hit_ns = 0;
+            FB.probe_armed = 1;
+            pthread_mutex_unlock(&FB.lock);
+            /* position again: the first one may predate the server's
+             * view of our screen (it drops those, and the clicks) */
+            in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X, (int)w / 4);
+            in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, (int)h / 4 + 1);
+            in_syn(SREMFB_INDEV_POINTER);
             in_push(SREMFB_INDEV_POINTER, EV_KEY, BTN_LEFT, 1);
             in_syn(SREMFB_INDEV_POINTER);
             in_push(SREMFB_INDEV_POINTER, EV_KEY, BTN_LEFT, 0);
             in_syn(SREMFB_INDEV_POINTER);
             in_flush();
         }
-        LAT.phase = 2;
-        LAT.phase_ms = now + 500;
         return 0;
     case 2:                             /* random gap: decorrelate from the
                                            remote refresh phase */

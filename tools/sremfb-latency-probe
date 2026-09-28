@@ -23,7 +23,7 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 COLORS = ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0))     # red / blue
 
@@ -57,7 +57,8 @@ def main():
                     help="print every event")
     args = ap.parse_args()
 
-    app = Gtk.Application(application_id="fr.462eng.SremfbLatencyProbe")
+    app = Gtk.Application(application_id="fr.eng462.SremfbLatencyProbe",
+                          flags=Gio.ApplicationFlags.NON_UNIQUE)
     state = {"i": 0, "n": 0, "last": None, "area": None}
 
     def flip(what):

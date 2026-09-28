@@ -53,6 +53,8 @@ typedef struct SremfbInput SremfbInput;
 struct SremfbInput {
     SremfbIndev dev[SREMFB_INDEV_GAMEPAD + 1];   /* [0] unused */
     gboolean geo_warned;
+    gboolean abs_placed;               /* the pointer reached the client's
+                                          screen at least once */
     unsigned long n_events;
 };
 
@@ -566,6 +568,11 @@ void sremfb_input_msg(SremfbClient *c, const struct sremfb_input_msg *m)
         if (m->ev_code >= KEY_CNT || !bit_get(d->keys, m->ev_code) ||
             (v != 0 && v != 1))
             return;
+        /* a click before the pointer could be placed on the client's
+         * screen would land wherever the cursor was — on another
+         * monitor of this desktop: drop it */
+        if (m->dev == SREMFB_INDEV_POINTER && v == 1 && !in->abs_placed)
+            return;
         if (v == bit_get(d->down, m->ev_code))
             return;                    /* no double press, no release of
                                           a key that is not down */
@@ -590,6 +597,7 @@ void sremfb_input_msg(SremfbClient *c, const struct sremfb_input_msg *m)
                 layout_refresh();
                 return;
             }
+            in->abs_placed = TRUE;
         } else {
             v = CLAMP(v, d->abs_min[m->ev_code], d->abs_max[m->ev_code]);
         }
