@@ -234,6 +234,18 @@ position).
 > starts: the server then creates fresh cards that mutter discovers at
 > hotplug. It takes effect on the next GDM restart (`systemctl restart
 > gdm3`, or reboot) — a plain re-login is not enough.
+>
+> Another trap, mid-session: mutter **never** forgets a removed card
+> (`remove_all` from a mode switch, a server reset); a new card that gets
+> the same `/dev/dri/cardN` number is refused as a duplicate ("Failed to
+> hotplug secondary gpu: device already present") and its connector never
+> lights up. So the server creates its cards one at a time and only keeps
+> those gnome-shell actually opens (seen in `/proc/<pid>/fd`); refused
+> numbers stay in place as "dead" cards, never handed out, so the next one
+> gets a fresh number. The state lives in
+> `$XDG_RUNTIME_DIR/sremfb-evdi-cards` for gnome-shell's lifetime. Limit:
+> every stop/`remove_all`/start cycle uses up ~2 numbers (the kernel does
+> not give them all back); past card63, log out and back in.
 
 ## Windowed viewer
 

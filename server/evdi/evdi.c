@@ -25,6 +25,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <lz4.h>
@@ -290,32 +291,171 @@ static gboolean on_evdi_ready(gint fd, GIOCondition cond, gpointer data)
 
 /* ------------------------------------------------- connector control */
 
-/* Self-heal: once a mode-timeout proved that mutter wedges on the
- * devices we inherited (EBUSY on reopen — typically after a server
- * restart, or when the boot-time reset raced the compositor's own
- * enumeration), stop trusting pre-existing free devices: create a
- * brand-new one at acquire time and plug it immediately. mutter accepts
- * a freshly created card but closes it again within a few seconds of
- * inactivity, so creating it while the client connection is already in
- * hand (plug follows in <1 s) is the only reliable timing. Bounded: a
- * reused minor number can still be stale for mutter ("device already
- * present" in its journal) and burn an attempt. Returns the new card
- * index, or -1. */
-static int self_heal_add(SremfbServer *srv)
-{
-    gboolean existed[32] = { FALSE };
+/* ------------------------------------------ card numbers mutter knows */
 
-    if (EVS(srv)->selfheal_left == 0) {
-        g_warning("self-heal budget spent — a session re-login will "
-                  "clear mutter");
-        return -1;
+/*
+ * mutter (GNOME 48) never forgets a secondary GPU: when an evdi card is
+ * removed (remove_all from a mode switch, or our own reset), its
+ * /dev/dri/cardN entry stays in mutter's GPU list ("Failed to reopen
+ * cardN" on every reconfiguration), and a *new* card that the kernel later
+ * gives the same number is refused as a duplicate ("Failed to hotplug
+ * secondary gpu: device already present") — its connector never lights
+ * up. DRM reuses freed numbers, so after a stop / remove_all / start
+ * cycle the fresh cards of the reset were exactly those poisoned numbers:
+ * two 10 s mode timeouts, quarantine, then self-heal finally minted a
+ * number mutter had never seen.
+ *
+ * So every card we create is checked: a number already handed to this
+ * compositor instance is "dead" on arrival, and a new number must be
+ * picked up by gnome-shell (its /proc/<pid>/fd shows the card within a
+ * second, logind's TakeDevice) to count as usable. Dead cards are simply
+ * left in place — occupying their number, so the next add gets a fresh
+ * one — and never handed to a client; the next remove_all takes them
+ * away. What mutter has seen is remembered in $XDG_RUNTIME_DIR for the
+ * lifetime of the gnome-shell process, so a server restart knows too.
+ */
+#define EVDI_MAX_CARDS     64
+#define CARDS_FILE         "sremfb-evdi-cards"
+
+enum { CARD_UNKNOWN = 0, CARD_OK, CARD_DEAD };
+
+static struct {
+    gboolean loaded;
+    pid_t shell;                       /* gnome-shell the states refer to */
+    uint8_t state[EVDI_MAX_CARDS];
+    gboolean no_verify;                /* can't watch the compositor */
+} K;
+
+/* The session's gnome-shell (ours: same uid), 0 when none. */
+static pid_t compositor_pid(void)
+{
+    GDir *d = g_dir_open("/proc", 0, NULL);
+    const char *n;
+    pid_t found = 0;
+
+    if (!d)
+        return 0;
+    while (!found && (n = g_dir_read_name(d))) {
+        char path[64];
+        gchar *comm = NULL;
+        struct stat st;
+
+        if (n[0] < '1' || n[0] > '9')
+            continue;
+        g_snprintf(path, sizeof(path), "/proc/%s", n);
+        if (stat(path, &st) < 0 || st.st_uid != getuid())
+            continue;
+        g_snprintf(path, sizeof(path), "/proc/%s/comm", n);
+        if (g_file_get_contents(path, &comm, NULL, NULL) &&
+            g_strcmp0(g_strchomp(comm), "gnome-shell") == 0)
+            found = (pid_t)atoi(n);
+        g_free(comm);
     }
-    for (int i = 0; i < 32; i++)
+    g_dir_close(d);
+    return found;
+}
+
+/* 1 = the compositor has /dev/dri/card<card> open, 0 = not, -1 = can't
+ * tell (no /proc access). */
+static int compositor_holds(pid_t pid, int card)
+{
+    char dir[64], want[32];
+    GDir *d;
+    const char *n;
+    int held = 0;
+
+    g_snprintf(dir, sizeof(dir), "/proc/%d/fd", (int)pid);
+    g_snprintf(want, sizeof(want), "/dev/dri/card%d", card);
+    d = g_dir_open(dir, 0, NULL);
+    if (!d)
+        return -1;
+    while (!held && (n = g_dir_read_name(d))) {
+        char path[96], target[64];
+        ssize_t l;
+
+        g_snprintf(path, sizeof(path), "%s/%s", dir, n);
+        l = readlink(path, target, sizeof(target) - 1);
+        if (l > 0) {
+            target[l] = '\0';
+            held = strcmp(target, want) == 0;
+        }
+    }
+    g_dir_close(d);
+    return held;
+}
+
+static gchar *cards_path(void)
+{
+    const char *rundir = getenv("XDG_RUNTIME_DIR");
+
+    return g_build_filename(rundir && *rundir ? rundir : "/tmp",
+                            CARDS_FILE, NULL);
+}
+
+/* Loads the card states when they belong to the running gnome-shell. */
+static void cards_load(void)
+{
+    pid_t shell = compositor_pid();
+    gchar *path, *txt = NULL;
+
+    if (K.loaded && K.shell == shell)
+        return;
+    memset(&K, 0, sizeof(K));
+    K.loaded = TRUE;
+    K.shell = shell;
+    path = cards_path();
+    if (shell && g_file_get_contents(path, &txt, NULL, NULL)) {
+        gchar **lines = g_strsplit(txt, "\n", -1);
+        if (lines[0] && atoi(lines[0]) == (int)shell) {
+            for (gchar **l = lines + 1; *l; l++) {
+                int card = -1;
+                char what[8] = "";
+                if (sscanf(*l, "%d %7s", &card, what) == 2 &&
+                    card >= 0 && card < EVDI_MAX_CARDS)
+                    K.state[card] = strcmp(what, "ok") == 0 ? CARD_OK
+                                                             : CARD_DEAD;
+            }
+        }
+        g_strfreev(lines);
+    }
+    g_free(txt);
+    g_free(path);
+}
+
+static void cards_save(void)
+{
+    GString *s = g_string_new(NULL);
+    gchar *path = cards_path();
+
+    g_string_append_printf(s, "%d\n", (int)K.shell);
+    for (int i = 0; i < EVDI_MAX_CARDS; i++)
+        if (K.state[i] != CARD_UNKNOWN)
+            g_string_append_printf(s, "%d %s\n", i,
+                                   K.state[i] == CARD_OK ? "ok" : "dead");
+    g_file_set_contents(path, s->str, (gssize)s->len, NULL);
+    g_string_free(s, TRUE);
+    g_free(path);
+}
+
+/* A card mutter refuses (number reused within its lifetime). */
+static gboolean card_dead(int card)
+{
+    cards_load();
+    return card >= 0 && card < EVDI_MAX_CARDS && K.state[card] == CARD_DEAD;
+}
+
+/* Creates one evdi device, returns its card index once the node is
+ * usable by us, or -1. */
+static int evdi_add_one(void)
+{
+    gboolean existed[EVDI_MAX_CARDS];
+
+    for (int i = 0; i < EVDI_MAX_CARDS; i++)
         existed[i] = evdi_check_device(i) == AVAILABLE;
 
     int fd = open("/sys/devices/evdi/add", O_WRONLY | O_CLOEXEC);
     if (fd < 0) {
-        g_warning("cannot add a fresh evdi device (%s) — is "
+        g_warning("cannot add an evdi device (%s) — is "
                   "sremfb-evdi-perms.service active?", g_strerror(errno));
         return -1;
     }
@@ -325,17 +465,92 @@ static int self_heal_add(SremfbServer *srv)
         return -1;
     }
     close(fd);
-    EVS(srv)->selfheal_left--;
 
     /* the node appears asynchronously (udev) */
-    for (int tries = 0; tries < 40; tries++) {
-        for (int i = 0; i < 32; i++)
+    for (int tries = 0; tries < 100; tries++) {
+        for (int i = 0; i < EVDI_MAX_CARDS; i++)
             if (!existed[i] && evdi_check_device(i) == AVAILABLE)
                 return i;
-        g_usleep(50 * 1000);
+        g_usleep(20 * 1000);
     }
-    g_warning("fresh evdi device never appeared");
+    g_warning("new evdi device never appeared");
     return -1;
+}
+
+/* Adds evdi devices until one gets a card number the compositor accepts,
+ * and returns it (-1 on failure). The refused ones stay as placeholders.
+ * Each accepted card is also ready for us: mutter only sees it after
+ * udev (and its uaccess ACL) processed it. */
+static int evdi_add_usable(void)
+{
+    int unconfirmed = 0;
+
+    cards_load();
+    for (int attempt = 0; attempt < 24; attempt++) {
+        int card = evdi_add_one();
+        if (card < 0)
+            return -1;
+        if (card >= EVDI_MAX_CARDS)
+            return card;               /* beyond what we track: hope */
+        if (K.state[card] != CARD_UNKNOWN) {
+            K.state[card] = CARD_DEAD;
+            cards_save();
+            g_message("evdi: card%d reuses a number gnome-shell already "
+                      "knows (it would ignore it) — left as a placeholder",
+                      card);
+            continue;
+        }
+        if (!K.shell || K.no_verify) {
+            K.state[card] = CARD_OK;
+            cards_save();
+            return card;
+        }
+        int held = 0;
+        for (int t = 0; t < 150 && held == 0; t++) {   /* 1.5 s */
+            held = compositor_holds(K.shell, card);
+            if (held == 0)
+                g_usleep(10 * 1000);
+        }
+        if (held != 0) {               /* picked up, or can't tell */
+            if (held < 0) {
+                K.no_verify = TRUE;
+                g_message("evdi: cannot watch gnome-shell's devices, "
+                          "trusting new cards blindly");
+            }
+            K.state[card] = CARD_OK;
+            cards_save();
+            return card;
+        }
+        K.state[card] = CARD_DEAD;
+        cards_save();
+        g_message("evdi: gnome-shell did not pick card%d up — left as a "
+                  "placeholder", card);
+        if (++unconfirmed >= 3) {
+            /* a stuck or different compositor: stop second-guessing,
+             * the mode timeout and quarantine still stand behind */
+            K.no_verify = TRUE;
+            g_warning("evdi: gnome-shell ignored 3 new cards in a row, "
+                      "no longer checking");
+        }
+    }
+    g_warning("evdi: no usable card number after 24 additions");
+    return -1;
+}
+
+/* Self-heal: once a mode-timeout proved that mutter wedges on the
+ * devices we inherited, stop trusting pre-existing free devices: create a
+ * brand-new one at acquire time and plug it immediately. Bounded, so a
+ * compositor that is truly gone does not get cards forever. Returns the
+ * new card index, or -1. */
+static int self_heal_add(SremfbServer *srv)
+{
+    if (EVS(srv)->selfheal_left == 0) {
+        g_warning("self-heal budget spent — a session re-login will "
+                  "clear mutter");
+        return -1;
+    }
+    EVS(srv)->selfheal_left--;
+    return evdi_add_usable();
 }
 
 static gboolean on_mode_timeout(gpointer data)
@@ -456,13 +671,16 @@ void sremfb_evdi_reset(unsigned count)
      * is left (removed on purpose, e.g. a game mode that unplugs the
      * cards for VR, or a new session that kept $XDG_RUNTIME_DIR), a
      * restart must create them again instead of waiting forever. */
-    if (g_file_test(marker, G_FILE_TEST_EXISTS) && sremfb_evdi_probe()) {
+    gboolean usable = FALSE;
+    for (int i = 0; i < EVDI_MAX_CARDS && !usable; i++)
+        usable = evdi_check_device(i) == AVAILABLE && !card_dead(i);
+    if (g_file_test(marker, G_FILE_TEST_EXISTS) && usable) {
         g_message("evdi reset skipped: restart (keeping the devices the "
                   "compositor already holds open)");
         return;
     }
 
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < EVDI_MAX_CARDS; i++) {
         char path[32];
         if (evdi_check_device(i) != AVAILABLE)
             continue;
@@ -479,26 +697,24 @@ void sremfb_evdi_reset(unsigned count)
     }
 
     int rfd = open("/sys/devices/evdi/remove_all", O_WRONLY | O_CLOEXEC);
-    int afd = open("/sys/devices/evdi/add", O_WRONLY | O_CLOEXEC);
-    if (rfd < 0 || afd < 0) {
+    if (rfd < 0 || access("/sys/devices/evdi/add", W_OK) < 0) {
         g_message("evdi reset skipped (no write access to "
                   "/sys/devices/evdi — udev rule missing or group)");
         if (rfd >= 0)
             close(rfd);
-        if (afd >= 0)
-            close(afd);
         return;
     }
     if (write(rfd, "1", 1) < 0)
         g_warning("evdi remove_all failed: %s", g_strerror(errno));
     close(rfd);
     g_usleep(300 * 1000);
+    /* one by one, skipping the numbers mutter already knows (see
+     * evdi_add_usable) */
+    unsigned made = 0;
     for (unsigned i = 0; i < count; i++)
-        if (write(afd, "1", 1) < 0)
-            g_warning("evdi add failed: %s", g_strerror(errno));
-    close(afd);
-    g_usleep(300 * 1000);
-    g_message("evdi devices reset: %u fresh device(s)", count);
+        if (evdi_add_usable() >= 0)
+            made++;
+    g_message("evdi devices reset: %u fresh device(s)", made);
     /* Mark the cold-boot reset as done so a later restart keeps the
      * compositor's devices instead of wedging it. */
     g_file_set_contents(marker, "", 0, NULL);
@@ -506,7 +722,7 @@ void sremfb_evdi_reset(unsigned count)
 
 gboolean sremfb_evdi_probe(void)
 {
-    for (int i = 0; i < 32; i++)
+    for (int i = 0; i < EVDI_MAX_CARDS; i++)
         if (evdi_check_device(i) == AVAILABLE)
             return TRUE;
     return FALSE;
@@ -588,8 +804,8 @@ static gboolean sremfb_evdi_acquire(SremfbClient *c)
             return TRUE;
     }
 
-    for (int i = 0; i < 32; i++) {
-        if (evdi_check_device(i) != AVAILABLE)
+    for (int i = 0; i < EVDI_MAX_CARDS; i++) {
+        if (evdi_check_device(i) != AVAILABLE || card_dead(i))
             continue;
         if (acquire_card(c, i, ""))
             return TRUE;
