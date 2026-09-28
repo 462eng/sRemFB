@@ -393,6 +393,23 @@ static void sample_tcp_rtt(struct view_net *n)
 
 /* ----------------------------------------------------------- stream */
 
+/* Publishes the open batch unless `need` more bytes are already waiting
+ * in the socket: whatever comes next (a PING, a rect still in flight)
+ * must never hold decoded pixels back. */
+static void batch_flush_unless(struct view_net *n, uint64_t *batch_t0,
+                               size_t need)
+{
+    int avail = 0;
+
+    if (!*batch_t0)
+        return;
+    if (ioctl(n->sock, FIONREAD, &avail) < 0 || (size_t)avail < need ||
+        now_ns() - *batch_t0 >= BATCH_MAX_NS) {
+        publish(n);
+        *batch_t0 = 0;
+    }
+}
+
 /* PING: echo it back right away. Everything queued ahead of it has
  * already been decoded into the shared framebuffer, which is what the
  * protocol asks ("applied"); presentation runs on its own and is not
@@ -454,6 +471,7 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
 
     while (!atomic_load(&n->stop)) {
         struct sremfb_frame_hdr hd;
+        batch_flush_unless(n, &batch_t0, sizeof(hd));
         if (readn(n, &hd, sizeof(hd), timeout) < 0)
             break;
         if (hd.magic != SREMFB_MAGIC) {
@@ -464,6 +482,11 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
                                   sizeof(hd) + hd.payload_len,
                                   memory_order_relaxed);
 
+        if (hd.encoding != SREMFB_ENC_RAW && hd.encoding != SREMFB_ENC_LZ4 &&
+            batch_t0) {                 /* control message: pixels first */
+            publish(n);
+            batch_t0 = 0;
+        }
         if (hd.encoding == SREMFB_ENC_BLANK ||
             hd.encoding == SREMFB_ENC_UNBLANK) {
             if (hd.payload_len != 0) {
@@ -508,6 +531,7 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
          * a rect that took longer than BATCH_MAX_NS to receive (a full
          * frame on a saturated link) is published at once instead of
          * waiting for the next one */
+        batch_flush_unless(n, &batch_t0, hd.payload_len);
         if (!batch_t0)
             batch_t0 = now_ns();
 
@@ -542,12 +566,9 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
         fb_put_rect(n, &hd, scratch);
         atomic_fetch_add_explicit(&n->st->rx_rects, 1, memory_order_relaxed);
 
-        int avail = 0;
-        if (ioctl(n->sock, FIONREAD, &avail) < 0 ||
-            avail < (int)sizeof(hd) || now_ns() - batch_t0 >= BATCH_MAX_NS) {
-            publish(n);
-            batch_t0 = 0;
-        }
+        /* published at the loop top when caught up (no complete header
+         * waiting), before a payload still in flight, or before a
+         * control message */
     }
 
     pthread_mutex_lock(&n->wlock);

@@ -1082,10 +1082,15 @@ static int lat_step(void)
         } else {
             pthread_mutex_lock(&FB.lock);
             FB.probe_armed = 0;
+            uint32_t cur = view_fb_pixel(&FB, (unsigned)px, (unsigned)py);
+            uint32_t base = FB.probe_base;
+            uint64_t late = FB.probe_hit_ns;
             pthread_mutex_unlock(&FB.lock);
             LAT.lost++;
-            view_log("latency: trial %u lost (no change within %d ms)",
-                     LAT.done + LAT.lost, LAT_TIMEOUT_MS);
+            view_log("latency: trial %u lost (no change within %d ms; "
+                     "pixel %06x, before %06x%s)", LAT.done + LAT.lost,
+                     LAT_TIMEOUT_MS, cur, base,
+                     late ? ", changed but not shown yet" : "");
         }
         if (LAT.kind == LAT_KEY) {
             in_push(SREMFB_INDEV_KEYBOARD, EV_KEY, KEY_LEFTSHIFT, 0);
