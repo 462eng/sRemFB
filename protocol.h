@@ -25,6 +25,13 @@
  *     client messages (evdev type/code/value triplets), which the server
  *     replays on per-client uinput devices. Off unless the server's admin
  *     enabled it (SREMFB_INPUT=1) and confirmed in the server hello.
+ *   - AUDIO: the server creates a virtual PipeWire output for the client
+ *     and streams what is played there as raw PCM (48 kHz, stereo, S16LE)
+ *     over a separate UDP flow. The client opens it from its own UDP
+ *     socket with SREMFB_UDP_AUDIO_HELLO datagrams carrying the token of
+ *     the server hello (so firewalls and NAT see an outgoing flow); the
+ *     server answers each hello with an ECHO (clock offset for latency
+ *     estimates) and sends SREMFB_UDP_AUDIO packets back to that address.
  */
 #ifndef SREMFB_PROTOCOL_H
 #define SREMFB_PROTOCOL_H
@@ -79,6 +86,9 @@ enum sremfb_encoding {
                                                  INPUT messages (only does
                                                  so once the server hello
                                                  carries SREMFB_SRV_FLAG_INPUT) */
+#define SREMFB_HELLO_FLAG_AUDIO    (1u << 5)  /* client plays the server's
+                                                 audio (UDP PCM, see
+                                                 struct sremfb_audio_hdr) */
 
 /* server hello flags (the server only sets a bit when the client
  * advertised the matching capability) */
@@ -86,6 +96,9 @@ enum sremfb_encoding {
 #define SREMFB_SRV_FLAG_H264 (1u << 1)    /* the stream may switch to H.264 */
 #define SREMFB_SRV_FLAG_INPUT (1u << 2)   /* INPUT messages are accepted: the
                                              server's input devices exist */
+#define SREMFB_SRV_FLAG_AUDIO (1u << 3)   /* the client's audio output exists:
+                                             open the UDP flow with
+                                             server_hello.audio_token */
 
 /* Server hello status codes. */
 enum sremfb_status {
@@ -123,7 +136,8 @@ struct sremfb_server_hello {
     uint8_t  pixfmt;           /* wire pixel format of the frames that follow */
     uint8_t  flags;            /* SREMFB_SRV_FLAG_* (was reserved, always 0
                                   from older servers) */
-    uint8_t  reserved[2];
+    uint16_t audio_token;      /* with SREMFB_SRV_FLAG_AUDIO: to quote in
+                                  the UDP AUDIO_HELLO (was reserved) */
 } __attribute__((packed));
 
 /* server -> client, one per message, followed by payload_len bytes.
@@ -184,10 +198,73 @@ struct sremfb_input_msg {
     int32_t  ev_value;
 } __attribute__((packed));
 
+/*
+ * Audio (SREMFB_SRV_FLAG_AUDIO): datagrams on UDP, same port number as the
+ * TCP listener. Every datagram starts with magic + type.
+ *
+ *   client -> server  AUDIO_HELLO (struct sremfb_udp_hello, 16 B), from
+ *                     the socket the client receives on: at least once a
+ *                     second while it wants audio (it is also the
+ *                     keepalive; the server stops sending after ~5 s
+ *                     without one). The server only accepts it from the
+ *                     TCP peer's IP address with the right token.
+ *   server -> client  ECHO (struct sremfb_udp_echo, 24 B), one per hello:
+ *                     t_client_us back + the server clock at reception.
+ *   server -> client  AUDIO (struct sremfb_audio_hdr + frames * 4 bytes of
+ *                     interleaved S16LE stereo at 48 kHz), one every
+ *                     ~2.7 ms while something plays (at most 240 frames =
+ *                     5 ms per packet). seq increments by one per packet;
+ *                     t_us is the server's monotonic clock when the first
+ *                     frame left the audio graph. No retransmission: a
+ *                     missing seq is a lost packet.
+ */
+enum sremfb_udp_type {
+    SREMFB_UDP_AUDIO       = 1,
+    SREMFB_UDP_AUDIO_HELLO = 2,
+    SREMFB_UDP_ECHO        = 3,
+};
+
+enum sremfb_audio_fmt {
+    SREMFB_AUDIO_S16LE_48K_STEREO = 0,
+};
+
+#define SREMFB_AUDIO_RATE       48000
+#define SREMFB_AUDIO_CHANNELS   2
+#define SREMFB_AUDIO_MAX_FRAMES 240       /* 5 ms: 960 B of payload */
+
+struct sremfb_audio_hdr {
+    uint32_t magic;            /* SREMFB_MAGIC */
+    uint8_t  type;             /* SREMFB_UDP_AUDIO */
+    uint8_t  format;           /* enum sremfb_audio_fmt */
+    uint16_t frames;           /* sample frames that follow */
+    uint32_t seq;
+    uint32_t reserved;
+    uint64_t t_us;             /* server CLOCK_MONOTONIC, µs */
+} __attribute__((packed));
+
+struct sremfb_udp_hello {
+    uint32_t magic;            /* SREMFB_MAGIC */
+    uint8_t  type;             /* SREMFB_UDP_AUDIO_HELLO */
+    uint8_t  reserved;
+    uint16_t token;            /* server_hello.audio_token */
+    uint64_t t_client_us;      /* client clock, echoed back */
+} __attribute__((packed));
+
+struct sremfb_udp_echo {
+    uint32_t magic;            /* SREMFB_MAGIC */
+    uint8_t  type;             /* SREMFB_UDP_ECHO */
+    uint8_t  reserved[3];
+    uint64_t t_client_us;      /* from the hello, verbatim */
+    uint64_t t_server_us;      /* server CLOCK_MONOTONIC at reception */
+} __attribute__((packed));
+
 _Static_assert(sizeof(struct sremfb_client_hello) == 48, "client hello size");
 _Static_assert(sizeof(struct sremfb_server_hello) == 16, "server hello size");
 _Static_assert(sizeof(struct sremfb_frame_hdr)   == 20, "frame header size");
 _Static_assert(sizeof(struct sremfb_client_msg)  == 16, "client msg size");
 _Static_assert(sizeof(struct sremfb_input_msg)   == 16, "input msg size");
+_Static_assert(sizeof(struct sremfb_audio_hdr)   == 24, "audio header size");
+_Static_assert(sizeof(struct sremfb_udp_hello)   == 16, "udp hello size");
+_Static_assert(sizeof(struct sremfb_udp_echo)    == 24, "udp echo size");
 
 #endif /* SREMFB_PROTOCOL_H */

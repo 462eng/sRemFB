@@ -16,3 +16,9 @@ SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
 # par SREMFB_ALLOW qui le demandent (sremfb-view). Quiconque est admis
 # peut alors taper et cliquer sur cette session : LAN de confiance only.
 # SREMFB_INPUT=1
+
+# Son des clients qui le demandent (sremfb-view) : une sortie PipeWire
+# « sRemFB <modèle> » par client, sortie par défaut tant qu'il est
+# connecté, envoyée en PCM brut sur UDP (même numéro de port que le TCP).
+# ACTIVÉ par défaut ; 0 = jamais de son.
+# SREMFB_AUDIO=0

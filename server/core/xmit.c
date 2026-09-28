@@ -78,6 +78,8 @@ void sremfb_xmit_hello(SremfbClient *c, uint8_t flags)
     net_fill_server_hello(&sh, (uint16_t)c->geom.width,
                           (uint16_t)c->geom.height, c->hello.pixfmt,
                           SREMFB_STATUS_OK, flags);
+    if (flags & SREMFB_SRV_FLAG_AUDIO)
+        sh.audio_token = c->audio_token;
     sremfb_xmit_ctrl(c, &sh, sizeof(sh));
 }
 

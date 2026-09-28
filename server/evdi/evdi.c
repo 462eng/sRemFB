@@ -231,6 +231,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
             getenv("SREMFB_NO_H264") == NULL)
             flags |= SREMFB_SRV_FLAG_H264;
         flags |= sremfb_input_start(c);   /* devices before the hello */
+        flags |= sremfb_audio_start(c);   /* output before the hello */
         g_clear_handle_id(&EV(c)->mode_timeout_id, g_source_remove);
         sremfb_xmit_hello(c, flags);
         c->state = SREMFB_CLIENT_STREAMING;

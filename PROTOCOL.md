@@ -5,14 +5,16 @@
 sRemFB's application protocol, shared verbatim by server and client in
 [`protocol.h`](protocol.h). Version described here: **v2**
 (`SREMFB_PROTO_VER = 2`), including its **feature bits** (delay feedback,
-adaptive H.264, keyboard/mouse/gamepad input, negotiated through the
-hellos without a version bump — every old/new combination stays
+adaptive H.264, keyboard/mouse/gamepad input, sound, negotiated through
+the hellos without a version bump — every old/new combination stays
 compatible).
 
 ## Transport
 
 - **TCP**, a single port (default **4629**), with several simultaneous
   clients told apart by their MAC address (see [README.md](README.md)).
+- **UDP** on the same port number, only for sound when negotiated (see
+  "Sound").
 - `TCP_NODELAY`, `SO_KEEPALIVE` (idle 10 s / intvl 5 s / cnt 3),
   `TCP_USER_TIMEOUT` 6 s (unACKed data ⇒ the connection dies even
   mid-send), `SO_SNDTIMEO` 20 s, `SO_RCVTIMEO` 5 s. `SIGPIPE` ignored.
@@ -61,6 +63,12 @@ client → server   :  sremfb_input_msg INPUT (16 B, input events, when
 server → client   :  sremfb_frame_hdr H264 + access unit   (under
                      measured congestion, if negotiated; H264_EOS ends
                      the episode)
+
+UDP, when sound is negotiated:
+client → server   :  sremfb_udp_hello AUDIO_HELLO (16 B, ≥ 1/s)
+server → client   :  sremfb_udp_echo ECHO (24 B, one per hello)
+server → client   :  sremfb_audio_hdr + PCM (≈ 1 packet / 2.7 ms while
+                     something plays)
 ```
 
 ## Messages
@@ -73,7 +81,7 @@ Sent exactly once, right after the connection.
 |---|---|---|
 | `magic` | `u32` | `SREMFB_MAGIC` |
 | `proto_ver` | `u16` | `SREMFB_PROTO_VER` (2) |
-| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = the client accepts LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = the client echoes PING as PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = the client decodes H.264 (4:2:0, Annex B) at its resolution · bit 3 `SREMFB_HELLO_FLAG_USB` = the client exports USB devices over usbip (see "USB teleport") · bit 4 `SREMFB_HELLO_FLAG_INPUT` = the client would like to send its input (see "Input") |
+| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = the client accepts LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = the client echoes PING as PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = the client decodes H.264 (4:2:0, Annex B) at its resolution · bit 3 `SREMFB_HELLO_FLAG_USB` = the client exports USB devices over usbip (see "USB teleport") · bit 4 `SREMFB_HELLO_FLAG_INPUT` = the client would like to send its input (see "Input") · bit 5 `SREMFB_HELLO_FLAG_AUDIO` = the client plays the server's sound (see "Sound") |
 | `xres`, `yres` | `u16` | visible framebuffer resolution |
 | `bpp` | `u8` | framebuffer bits per pixel: 16 or 32 |
 | `pixfmt` | `u8` | `enum sremfb_pixfmt` |
@@ -95,8 +103,8 @@ Sent once, after the compositor has set a mode on the connector.
 | `status` | `u16` | `enum sremfb_status`; nonzero ⇒ the client closes |
 | `width`, `height` | `u16` | negotiated stream size (normally `xres`,`yres`) |
 | `pixfmt` | `u8` | pixel format of the frames that follow |
-| `flags` | `u8` | bit 0 `SREMFB_SRV_FLAG_PING` = PINGs may appear · bit 1 `SREMFB_SRV_FLAG_H264` = the stream may switch to H.264 · bit 2 `SREMFB_SRV_FLAG_INPUT` = INPUT messages are accepted (devices created). The server only sets a bit the client advertised; older servers always send 0 here |
-| `reserved[2]` | `u8` | reserved |
+| `flags` | `u8` | bit 0 `SREMFB_SRV_FLAG_PING` = PINGs may appear · bit 1 `SREMFB_SRV_FLAG_H264` = the stream may switch to H.264 · bit 2 `SREMFB_SRV_FLAG_INPUT` = INPUT messages are accepted (devices created) · bit 3 `SREMFB_SRV_FLAG_AUDIO` = the client's sound output exists, open the UDP flow. The server only sets a bit the client advertised; older servers always send 0 here |
+| `audio_token` | `u16` | with `SREMFB_SRV_FLAG_AUDIO`: token to quote in the UDP AUDIO_HELLOs (formerly `reserved[2]`, always 0 from older servers) |
 
 Status codes (`enum sremfb_status`):
 
@@ -220,6 +228,78 @@ connector, absolute events are dropped.
 Gamepad: "Microsoft X-Box 360 pad", USB `045e:028e`, so Steam and SDL
 apply their stock mapping. No force feedback (rumble) yet.
 
+## Sound
+
+Negotiated both ways, like input:
+
+1. the client sets `SREMFB_HELLO_FLAG_AUDIO` in its hello;
+2. the server creates the client's sound output **before** sending its
+   hello (a PipeWire output "sRemFB <model>", class `Audio/Sink`, which
+   becomes the desktop's default output while the client is there) and
+   only sets `SREMFB_SRV_FLAG_AUDIO` + `audio_token` when it exists and
+   the administrator did not turn sound off (`SREMFB_AUDIO=0`);
+3. the client only opens the UDP flow once that bit is received.
+
+The UDP flow (same port number as TCP) is opened **by the client**: from
+the socket it listens on, it sends `AUDIO_HELLO`s carrying the token,
+every 250 ms until the first packet, then every second (that is also
+the keepalive; after 5 s without a hello the server stops sending). The
+server only accepts a hello from the TCP peer's IP address with the
+right token, answers each one with an `ECHO` and sends the sound to the
+source address. Firewalls and NAT only see a flow going out of the
+client. Every datagram starts with `magic` + `type` (`enum
+sremfb_udp_type`).
+
+### `sremfb_udp_hello` — 16 bytes, client → server (UDP)
+
+| Field | Type | Role |
+|---|---|---|
+| `magic` | `u32` | `SREMFB_MAGIC` |
+| `type` | `u8` | 2 = `SREMFB_UDP_AUDIO_HELLO` |
+| `reserved` | `u8` | 0 |
+| `token` | `u16` | `server_hello.audio_token` |
+| `t_client_us` | `u64` | client monotonic clock (µs), returned in the ECHO |
+
+### `sremfb_udp_echo` — 24 bytes, server → client (UDP)
+
+| Field | Type | Role |
+|---|---|---|
+| `magic` | `u32` | `SREMFB_MAGIC` |
+| `type` | `u8` | 3 = `SREMFB_UDP_ECHO` |
+| `reserved[3]` | `u8` | 0 |
+| `t_client_us` | `u64` | the hello's, verbatim |
+| `t_server_us` | `u64` | server monotonic clock (µs) at reception |
+
+With t1 = `t_client_us`, t2 = `t_server_us`, t3 = the ECHO's arrival:
+clock offset ≈ t2 − (t1 + t3)/2, within ± RTT/2 (the client keeps the
+sample with the smallest RTT among the last few). It only feeds the
+latency statistics.
+
+### `sremfb_audio_hdr` — 24 bytes + PCM, server → client (UDP)
+
+| Field | Type | Role |
+|---|---|---|
+| `magic` | `u32` | `SREMFB_MAGIC` |
+| `type` | `u8` | 1 = `SREMFB_UDP_AUDIO` |
+| `format` | `u8` | 0 = `SREMFB_AUDIO_S16LE_48K_STEREO` (the only format) |
+| `frames` | `u16` | frames that follow (1..240) |
+| `seq` | `u32` | +1 per packet; a gap = a lost packet |
+| `reserved` | `u32` | 0 |
+| `t_us` | `u64` | server monotonic clock (µs) when the first frame left the audio graph |
+
+Followed by `frames × 4` bytes of interleaved S16LE stereo PCM at
+48 kHz, **no codec**. The server sends one packet per PipeWire graph
+cycle (it asks for a 128-frame quantum, 2.7 ms; at most 240 frames =
+5 ms per packet, DSCP EF), nothing while nothing plays (output
+suspended). No retransmission. The client handles jitter: a short
+target buffer, lost packets replaced by as much silence, late packets
+ignored, and latency **never** drifts (beyond the target + 10 ms it
+drops packets until back on the target) — see
+[README.md](README.md#windowed-viewer).
+
+Rate: 192 kB/s of PCM (≈ 1.6 Mbit/s with headers). A codec (Opus) for
+Wi-Fi or SBCs is an idea for later; it would get another `format`.
+
 ## Pixels
 
 `enum sremfb_pixfmt`:
@@ -284,6 +364,12 @@ hello and never advertises `SREMFB_SRV_FLAG_INPUT`, so a new client stays
 view only; and even if it sent INPUT, those are 16-byte messages with a
 magic, which the old server ignores without losing the framing (unknown
 type). An old client never sets bit 4: the server creates nothing.
+
+And for sound: an old server ignores bit 5 and sends `flags` bit 3 and
+`audio_token` as zero — the new client opens no UDP flow; an old client
+does not set bit 5 and ignores the `audio_token` bytes (formerly
+`reserved`) — the server creates no sound output. Nothing changes on the
+TCP connection.
 
 ## USB teleport
 

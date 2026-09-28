@@ -27,6 +27,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <sys/socket.h>
 
 #include "protocol.h"
 
@@ -35,6 +36,15 @@
 
 struct view_rect {
     uint16_t x, y, w, h;
+};
+
+/* --latency-test with sound: the audio thread timestamps the probe's
+ * click (see audio.c) while armed. Atomics, no lock. */
+struct view_audio_probe {
+    atomic_int armed;
+    unsigned run;               /* audio thread only */
+    atomic_ullong hit_ns;       /* packet carrying the click received */
+    atomic_ullong out_ns;       /* ... estimated to leave the device */
 };
 
 /* The shared picture. Everything below `lock` is protected by it. */
@@ -66,6 +76,8 @@ struct view_fb {
     unsigned probe_x, probe_y;
     uint32_t probe_base;
     uint64_t probe_hit_ns;      /* CLOCK_MONOTONIC, 0 = not yet */
+
+    struct view_audio_probe aprobe;   /* not under lock */
 };
 
 /* Pixel value at (x, y) in the wire format. Caller holds fb->lock and
@@ -93,6 +105,15 @@ struct view_stats {
     atomic_ullong ping_queue_us;    /* sum over the pings of the queueing
                                        excess (see net.c) */
     atomic_uint tcp_rtt_us;         /* kernel smoothed RTT (TCP_INFO) */
+    /* audio thread (audio.c) */
+    atomic_int a_active;            /* an audio flow is up */
+    atomic_ullong a_packets, a_lost, a_late, a_dropped, a_underruns,
+                  a_restarts;
+    atomic_ullong a_owd_us, a_owd_n;     /* one-way delay (clock offset
+                                            from the UDP echoes) */
+    atomic_ullong a_level_us, a_level_n; /* buffer ahead of each packet */
+    atomic_int a_ratio_ppm;         /* drift correction */
+    atomic_uint a_rtt_us;           /* UDP round trip of the best echo */
     /* main thread */
     atomic_ullong presents;
     atomic_ullong present_ns;       /* texture upload + render + present */
@@ -105,6 +126,9 @@ struct view_opts {
     uint8_t pixfmt;                 /* requested wire format */
     int no_lz4;
     int no_input;                   /* never offer INPUT (view only) */
+    int no_audio;                   /* never offer AUDIO */
+    double audio_target_ms;         /* jitter buffer target */
+    const char *audio_dump;         /* raw S16LE copy of what is played */
     uint8_t mac[6];
     char model[13];                 /* not NUL-terminated when full */
 };
@@ -125,6 +149,16 @@ void view_net_stop(struct view_net *n);
  * is no live connection. Serialized with the network thread's own
  * writes. */
 int view_net_send(struct view_net *n, const void *msg, size_t len);
+
+/* Audio flow of one connection (audio.c): started once the server hello
+ * confirmed SREMFB_SRV_FLAG_AUDIO, stopped with the connection. */
+struct view_audio;
+struct view_audio *view_audio_start(const struct sockaddr *srv,
+                                    socklen_t srvlen, uint16_t token,
+                                    const struct view_opts *o,
+                                    struct view_stats *st,
+                                    struct view_audio_probe *probe);
+void view_audio_stop(struct view_audio *a);
 
 /* SDL scancode -> evdev KEY_* code, 0 = no equivalent (keymap.c). */
 int view_scancode_to_evdev(int scancode);

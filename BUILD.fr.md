@@ -16,7 +16,7 @@ propre `Makefile` si on ne veut qu'un côté.
 
 ```sh
 sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
-                 evdi-dkms libevdi-dev
+                 evdi-dkms libevdi-dev libpipewire-0.3-dev
 ```
 
 - `glib-2.0` — boucle d'événements, sources, utilitaires.
@@ -26,6 +26,9 @@ sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
 - `libevdi` + `evdi-dkms` — le module noyau EVDI (pilote DisplayLink) et
   sa bibliothèque. `evdi-dkms` compile le module pour le noyau courant ;
   un `dkms` fonctionnel et les en-têtes noyau sont donc requis.
+- `libpipewire-0.3` — le son des clients qui le demandent (une sortie
+  PipeWire par client) et `sremfb-latency-click`, la moitié sonore de la
+  sonde de latence.
 - `-lm` (libc math) pour le dithering.
 
 Testé avec libevdi/evdi-dkms **1.14.8** (Debian trixie).

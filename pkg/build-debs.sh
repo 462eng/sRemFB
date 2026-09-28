@@ -103,6 +103,9 @@ install -m 644 "$TOP/systemd/60-sremfb-uinput.rules" \
     "$ROOT/usr/lib/udev/rules.d/"
 install -m 755 "$TOP/tools/sremfb-latency-probe" \
     "$ROOT/usr/bin/sremfb-latency-probe"
+install -m 755 "$TOP/server/sremfb-latency-click" \
+    "$ROOT/usr/bin/sremfb-latency-click"
+strip "$ROOT/usr/bin/sremfb-latency-click"
 install -m 644 "$TOP/systemd/modules-load-sremfb.conf" \
     "$ROOT/etc/modules-load.d/sremfb.conf"
 install -m 644 "$TOP/systemd/modprobe-sremfb.conf" \
@@ -150,7 +153,8 @@ fi
 EOF
 chmod 755 "$ROOT/DEBIAN/postrm"
 make_deb sremfb-server amd64 \
-"Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms, libx264-164, usbip
+"Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms, libx264-164, usbip,
+ libpipewire-0.3-0t64
 Suggests: python3-gi, gir1.2-gtk-4.0
 Conflicts: rfb-server
 Replaces: rfb-server
@@ -163,7 +167,9 @@ Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
  périphériques USB que les clients exportent (téléport USB). Sur option
  (SREMFB_INPUT=1), rejoue clavier, souris et manette des clients sur des
  périphériques uinput (sremfb-latency-probe : sonde de mesure de latence,
- python3-gi + GTK 4)."
+ python3-gi + GTK 4). Donne aux clients qui le demandent le son du bureau
+ (sortie PipeWire par client, PCM brut sur UDP ; SREMFB_AUDIO=0 pour
+ couper)."
 
 # ---- sremfb-client (arm64 + armhf) ----
 for arch in arm64 armhf; do

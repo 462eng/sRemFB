@@ -16,7 +16,7 @@ Two C binaries, no exotic build system — just plain `Makefile`s.
 
 ```sh
 sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
-                 evdi-dkms libevdi-dev
+                 evdi-dkms libevdi-dev libpipewire-0.3-dev
 ```
 
 - `glib-2.0` — event loop, sources, utilities.
@@ -26,6 +26,9 @@ sudo apt install build-essential libglib2.0-dev liblz4-dev libx264-dev \
 - `libevdi` + `evdi-dkms` — the EVDI kernel module (the DisplayLink
   driver) and its library. `evdi-dkms` builds the module for the running
   kernel, so a working `dkms` and the kernel headers are required.
+- `libpipewire-0.3` — sound for the clients that ask for it (one
+  PipeWire output per client) and `sremfb-latency-click`, the sound half
+  of the latency probe.
 - `-lm` (libc math) for dithering.
 
 Tested with libevdi/evdi-dkms **1.14.8** (Debian trixie).

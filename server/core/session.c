@@ -13,7 +13,8 @@
  *
  * Config: --port N / SREMFB_PORT (default 4629),
  *         --allow CIDRs / SREMFB_ALLOW (IPv4 allowlist, empty = everyone),
- *         SREMFB_INPUT=1 (input injection, off by default — input.c).
+ *         SREMFB_INPUT=1 (input injection, off by default — input.c),
+ *         SREMFB_AUDIO=0 (no audio output for the clients — audio.c).
  */
 #include <errno.h>
 #include <glib-unix.h>
@@ -109,6 +110,7 @@ void sremfb_client_lost(SremfbClient *c)
     g_clear_handle_id(&c->lost_id, g_source_remove);
     g_clear_handle_id(&c->watch_id, g_source_remove);
     sremfb_input_stop(c);              /* release held keys first */
+    sremfb_audio_stop(c);              /* default output back */
     sremfb_usb_peer_remove(c);
     sremfb_xmit_reset(c);
     if (c->fd >= 0) {
@@ -270,6 +272,7 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     c->h264_cap = (hello.flags & SREMFB_HELLO_FLAG_H264) != 0;
     c->usb_cap = (hello.flags & SREMFB_HELLO_FLAG_USB) != 0;
     c->input_cap = (hello.flags & SREMFB_HELLO_FLAG_INPUT) != 0;
+    c->audio_cap = (hello.flags & SREMFB_HELLO_FLAG_AUDIO) != 0;
     g_strlcpy(c->peer, peer, sizeof(c->peer));
     g_snprintf(c->macstr, sizeof(c->macstr),
                "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -277,11 +280,11 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
                hello.mac[3], hello.mac[4], hello.mac[5]);
 
     g_message("[%s] client %s: fb %ux%u %ubpp pixfmt %u lz4=%c ping=%c "
-              "h264=%c usb=%c input=%c model \"%.13s\"",
+              "h264=%c usb=%c input=%c audio=%c model \"%.13s\"",
               c->macstr, peer, hello.xres, hello.yres, hello.bpp,
               hello.pixfmt, c->lz4 ? 'y' : 'n', c->feedback ? 'y' : 'n',
               c->h264_cap ? 'y' : 'n', c->usb_cap ? 'y' : 'n',
-              c->input_cap ? 'y' : 'n',
+              c->input_cap ? 'y' : 'n', c->audio_cap ? 'y' : 'n',
               hello.model[0] ? hello.model : "(none)");
 
     int st = srv->source->acquire(c);

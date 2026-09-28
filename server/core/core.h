@@ -32,6 +32,7 @@ typedef enum {
 
 struct SremfbEncoder;             /* encoder.c, keeps x264.h out of here */
 struct SremfbInput;               /* input.c, per-client uinput devices */
+struct SremfbAudio;               /* audio.c, per-client PipeWire output */
 
 /* One connected client = one TCP socket + one frame source (an EVDI
  * connector, a SPICE display, ...). The MAC address sent in the hello
@@ -90,6 +91,12 @@ struct SremfbClient {
     gboolean h264_cap;         /* client decodes H.264 */
     gboolean usb_cap;          /* client exports USB devices (usbip) */
     gboolean input_cap;        /* client offers to send INPUT messages */
+    gboolean audio_cap;        /* client plays audio (UDP PCM) */
+
+    /* audio (audio.c): non-NULL while the client's PipeWire output
+     * exists; the token goes into the server hello */
+    struct SremfbAudio *audio;
+    uint16_t audio_token;
 
     /* input injection (input.c): non-NULL once the uinput devices exist
      * and the server hello confirmed SREMFB_SRV_FLAG_INPUT */
@@ -224,6 +231,14 @@ uint8_t  sremfb_input_start(SremfbClient *c);      /* at STREAMING entry:
                                                       when the devices are up */
 void     sremfb_input_stop(SremfbClient *c);       /* releases, destroys */
 void     sremfb_input_msg(SremfbClient *c, const struct sremfb_input_msg *m);
+
+/* audio.c — the desktop's sound to the client, raw PCM over UDP */
+void     sremfb_audio_init(SremfbServer *srv);     /* unless SREMFB_AUDIO=0 */
+uint8_t  sremfb_audio_start(SremfbClient *c);      /* at STREAMING entry:
+                                                      SREMFB_SRV_FLAG_AUDIO
+                                                      when the output exists */
+void     sremfb_audio_stop(SremfbClient *c);
+void     sremfb_audio_shutdown(void);              /* restores the default */
 
 /* xmit.c — per-client non-blocking transmit queue */
 void sremfb_xmit_damage(SremfbClient *c, const struct sremfb_rect *rects,

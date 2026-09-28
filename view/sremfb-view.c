@@ -52,6 +52,7 @@ static struct {
     unsigned dump_n, dump_every;
     const char *dump_dir;
     const char *test;
+    unsigned audio_frames;
 } O;
 
 static struct view_fb FB = { .lock = PTHREAD_MUTEX_INITIALIZER };
@@ -915,6 +916,10 @@ static struct {
     int px, py;                 /* probe pixel, -1 = default */
     unsigned done, lost;
     double *rx_ms, *shown_ms;
+    double *arx_ms, *aout_ms;   /* the probe's click (sound), when the
+                                   server sends audio */
+    unsigned adone, alost;
+    int audio;                  /* this trial listens for the click */
     int phase;                  /* 0 wait stream, 1 settle, 2 gap, 3 armed */
     Uint64 phase_ms;
     uint64_t t0_ns;
@@ -967,7 +972,7 @@ static int cmp_double(const void *a, const void *b)
 static void lat_print(const char *what, double *v, unsigned n)
 {
     if (!n) {
-        printf("  %-6s no sample\n", what);
+        printf("  %-7s no sample\n", what);
         return;
     }
     qsort(v, n, sizeof(*v), cmp_double);
@@ -975,7 +980,7 @@ static void lat_print(const char *what, double *v, unsigned n)
     for (unsigned i = 0; i < n; i++)
         sum += v[i];
     unsigned p95 = (unsigned)((n - 1) * 0.95 + 0.5);
-    printf("  %-6s min %6.2f  median %6.2f  p95 %6.2f  max %6.2f  "
+    printf("  %-7s min %6.2f  median %6.2f  p95 %6.2f  max %6.2f  "
            "mean %6.2f ms\n", what, v[0],
            n % 2 ? v[n / 2] : (v[n / 2 - 1] + v[n / 2]) / 2, v[p95],
            v[n - 1], sum / n);
@@ -1077,6 +1082,14 @@ static int lat_step(void)
         FB.probe_armed = 1;
         pthread_mutex_unlock(&FB.lock);
         D.probe_shown_ns = 0;
+        /* sound too: sremfb-latency-probe --click answers every flip
+         * with a click in the server's default output */
+        LAT.audio = atomic_load(&ST.a_active);
+        if (LAT.audio) {
+            FB.aprobe.run = 0;
+            atomic_store(&FB.aprobe.hit_ns, 0);
+            atomic_store(&FB.aprobe.armed, 1);
+        }
         LAT.cx = px;
         LAT.cy = py;
         LAT.t0_ns = now_ns();
@@ -1091,8 +1104,22 @@ static int lat_step(void)
         int armed = FB.probe_armed;
         pthread_mutex_unlock(&FB.lock);
         if (now - LAT.phase_ms < LAT_TIMEOUT_MS &&
-            ((!hit && armed) || (hit && !D.probe_shown_ns)))
-            return 0;                   /* not decoded / not shown yet */
+            ((!hit && armed) || (hit && !D.probe_shown_ns) ||
+             (LAT.audio && atomic_load(&FB.aprobe.armed))))
+            return 0;                   /* not decoded / not shown / not
+                                           heard yet */
+        if (LAT.audio) {
+            uint64_t ahit = atomic_load(&FB.aprobe.hit_ns);
+            atomic_store(&FB.aprobe.armed, 0);
+            if (ahit) {
+                LAT.arx_ms[LAT.adone] = (double)(ahit - LAT.t0_ns) / 1e6;
+                LAT.aout_ms[LAT.adone] =
+                    (double)(atomic_load(&FB.aprobe.out_ns) - LAT.t0_ns) / 1e6;
+                LAT.adone++;
+            } else {
+                LAT.alost++;
+            }
+        }
         if (hit && D.probe_shown_ns) {
             LAT.rx_ms[LAT.done] = (double)(hit - LAT.t0_ns) / 1e6;
             LAT.shown_ms[LAT.done] =
@@ -1124,6 +1151,12 @@ static int lat_step(void)
                    w, h, LAT.done, LAT.lost);
             lat_print("rx", LAT.rx_ms, LAT.done);
             lat_print("shown", LAT.shown_ms, LAT.done);
+            if (LAT.adone || LAT.alost) {
+                printf("  sound (probe click, %u heard, %u missed):\n",
+                       LAT.adone, LAT.alost);
+                lat_print("snd rx", LAT.arx_ms, LAT.adone);
+                lat_print("snd out", LAT.aout_ms, LAT.adone);
+            }
             fflush(stdout);
             return 1;
         }
@@ -1163,6 +1196,8 @@ static void update_title(double fps)
 struct snap {
     unsigned long long batches, rects, bytes, dec_ns, dec_n, pings, pq_us;
     unsigned long long presents, pres_ns;
+    unsigned long long a_pk, a_lost, a_late, a_drop, a_under, a_restart,
+                       a_owd, a_owd_n, a_lvl, a_lvl_n;
 };
 
 static void snap_take(struct snap *s)
@@ -1176,6 +1211,16 @@ static void snap_take(struct snap *s)
     s->pq_us = atomic_load(&ST.ping_queue_us);
     s->presents = atomic_load(&ST.presents);
     s->pres_ns = atomic_load(&ST.present_ns);
+    s->a_pk = atomic_load(&ST.a_packets);
+    s->a_lost = atomic_load(&ST.a_lost);
+    s->a_late = atomic_load(&ST.a_late);
+    s->a_drop = atomic_load(&ST.a_dropped);
+    s->a_under = atomic_load(&ST.a_underruns);
+    s->a_restart = atomic_load(&ST.a_restarts);
+    s->a_owd = atomic_load(&ST.a_owd_us);
+    s->a_owd_n = atomic_load(&ST.a_owd_n);
+    s->a_lvl = atomic_load(&ST.a_level_us);
+    s->a_lvl_n = atomic_load(&ST.a_level_n);
 }
 
 static void print_stats(const struct snap *a, const struct snap *b,
@@ -1199,6 +1244,24 @@ static void print_stats(const struct snap *a, const struct snap *b,
             atomic_load(&ST.tcp_rtt_us) / 1000.0,
             pings ? (double)(b->pq_us - a->pq_us) / (double)pings / 1000.0 : 0.0,
             D.connected ? "" : " [not connected]");
+
+    if (!atomic_load(&ST.a_active))
+        return;
+    unsigned long long lvl_n = b->a_lvl_n - a->a_lvl_n;
+    unsigned long long owd_n = b->a_owd_n - a->a_owd_n;
+    double lvl = lvl_n ? (double)(b->a_lvl - a->a_lvl) / lvl_n / 1000.0 : 0;
+    double owd = owd_n ? (double)(b->a_owd - a->a_owd) / owd_n / 1000.0 : 0;
+    /* heard ~ one-way delay + the buffer ahead + one packet + the device
+     * period (this machine's sound server and DAC not counted) */
+    fprintf(stderr,
+            "sremfb-view: audio: %.0f pkt/s | lost %llu late %llu dropped "
+            "%llu underruns %llu restarts %llu | buffer %.1f ms | net %.2f ms "
+            "(rtt %.2f) | drift %+d ppm | est. latency %.1f ms\n",
+            (double)(b->a_pk - a->a_pk) / dt, b->a_lost - a->a_lost,
+            b->a_late - a->a_late, b->a_drop - a->a_drop,
+            b->a_under - a->a_under, b->a_restart - a->a_restart, lvl, owd,
+            atomic_load(&ST.a_rtt_us) / 1000.0, atomic_load(&ST.a_ratio_ppm),
+            lvl_n ? owd + lvl + 2.67 + O.audio_frames * 1000.0 / 48000 : 0.0);
 }
 
 /* ---------------------------------------------------------- main */
@@ -1235,6 +1298,12 @@ static void usage(FILE *out)
 "      --model NAME     monitor name shown by the server's desktop\n"
 "                       (13 chars max, default \"sremfb-view\")\n"
 "      --no-input       never forward input (view only)\n"
+"      --no-audio       don't ask for the server's sound\n"
+"      --audio-buffer MS  sound buffer target (default 10): deeper survives\n"
+"                       more network jitter, costs as much latency\n"
+"      --audio-frames N sound device period in frames (default 128)\n"
+"      --audio-dump FILE  append the played sound to FILE (raw S16LE\n"
+"                       stereo 48 kHz, validation)\n"
 "      --stats          print receive/present statistics every %d s\n"
 "      --dump N         save the first N updated frames as\n"
 "                       sremfb-view-NNNN.ppm (validation without a screen)\n"
@@ -1272,6 +1341,7 @@ enum {
     OPT_RGB565 = 256, OPT_NO_LZ4, OPT_VSYNC, OPT_NEAREST, OPT_RENDERER,
     OPT_MAC, OPT_MODEL, OPT_STATS, OPT_DUMP, OPT_DUMP_EVERY, OPT_DUMP_DIR,
     OPT_NO_INPUT, OPT_LAT, OPT_LAT_INPUT, OPT_LAT_AT, OPT_TEST,
+    OPT_NO_AUDIO, OPT_AUDIO_BUFFER, OPT_AUDIO_FRAMES, OPT_AUDIO_DUMP,
 };
 
 static void parse_args(int argc, char **argv)
@@ -1292,6 +1362,10 @@ static void parse_args(int argc, char **argv)
         { "dump-every", required_argument, NULL, OPT_DUMP_EVERY },
         { "dump-dir",   required_argument, NULL, OPT_DUMP_DIR },
         { "no-input",   no_argument,       NULL, OPT_NO_INPUT },
+        { "no-audio",   no_argument,       NULL, OPT_NO_AUDIO },
+        { "audio-buffer", required_argument, NULL, OPT_AUDIO_BUFFER },
+        { "audio-frames", required_argument, NULL, OPT_AUDIO_FRAMES },
+        { "audio-dump", required_argument, NULL, OPT_AUDIO_DUMP },
         { "latency-test", required_argument, NULL, OPT_LAT },
         { "latency-input", required_argument, NULL, OPT_LAT_INPUT },
         { "latency-at", required_argument, NULL, OPT_LAT_AT },
@@ -1310,6 +1384,8 @@ static void parse_args(int argc, char **argv)
     O.o.port = port;
     O.dump_every = 1;
     O.dump_dir = ".";
+    O.o.audio_target_ms = 10;
+    O.audio_frames = 128;
     model_copy(O.o.model, "sremfb-view");
 
     int c;
@@ -1355,6 +1431,18 @@ static void parse_args(int argc, char **argv)
             break;
         case OPT_DUMP_DIR:   O.dump_dir = optarg; break;
         case OPT_NO_INPUT:   O.o.no_input = 1; break;
+        case OPT_NO_AUDIO:   O.o.no_audio = 1; break;
+        case OPT_AUDIO_BUFFER:
+            O.o.audio_target_ms = parse_count(optarg, "--audio-buffer ms");
+            if (O.o.audio_target_ms > 500) {
+                fprintf(stderr, "sremfb-view: --audio-buffer 1..500 ms\n");
+                exit(2);
+            }
+            break;
+        case OPT_AUDIO_FRAMES:
+            O.audio_frames = parse_count(optarg, "--audio-frames count");
+            break;
+        case OPT_AUDIO_DUMP: O.o.audio_dump = optarg; break;
         case OPT_LAT:        LAT.n = parse_count(optarg, "trial count"); break;
         case OPT_LAT_INPUT:
             if (strcmp(optarg, "key") == 0) {
@@ -1431,12 +1519,24 @@ int main(int argc, char **argv)
 
     SDL_SetAppMetadata("sremfb-view", SREMFB_VIEW_VERSION,
                        "fr.462eng.sremfb-view");
+    if (!O.o.no_audio) {
+        /* short device period: the jitter buffer is ours (audio.c) */
+        char frames[16];
+        snprintf(frames, sizeof(frames), "%u", O.audio_frames);
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES, frames);
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_NAME, "sremfb-view");
+        SDL_SetHint(SDL_HINT_AUDIO_DEVICE_STREAM_ROLE, "Game");
+    }
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS |
                   (O.o.no_input ? 0 : SDL_INIT_GAMEPAD))) {
         view_log("SDL_Init: %s", SDL_GetError());
         return 1;
     }
     wake_type = SDL_RegisterEvents(1);
+    if (!O.o.no_audio && !SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        view_log("no sound (%s), continuing without", SDL_GetError());
+        O.o.no_audio = 1;
+    }
 
     int ww, wh;
     initial_window_size(&ww, &wh);
@@ -1472,6 +1572,8 @@ int main(int argc, char **argv)
     if (LAT.n) {
         LAT.rx_ms = calloc(LAT.n, sizeof(double));
         LAT.shown_ms = calloc(LAT.n, sizeof(double));
+        LAT.arx_ms = calloc(LAT.n, sizeof(double));
+        LAT.aout_ms = calloc(LAT.n, sizeof(double));
         local_only = 1;
         srand((unsigned)now_ns());
     }

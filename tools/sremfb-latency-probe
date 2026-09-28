@@ -9,7 +9,11 @@ covers input transport, the server's compositor and this window's
 rendering, capture, and the network back — all on the viewer's clock.
 
     sremfb-latency-probe [--connector DVI-I-2] [--timeout S]
-                         [--ignore-motion] [-v]
+                         [--ignore-motion] [--click] [-v]
+
+--click also plays a 2 ms click on the default sound output at every flip
+(through sremfb-latency-click, a 128-frame PipeWire player): with the
+server's audio, the viewer then times the sound of each event as well.
 
 Without --connector, picks the monitor whose model says "sremfb" (the
 viewer's default EDID model), else the only DVI-I-* connector (EVDI).
@@ -17,7 +21,10 @@ Needs python3-gi and GTK 4; run it inside the graphical session
 (WAYLAND_DISPLAY set). Ctrl-C or --timeout ends it.
 """
 import argparse
+import os
+import shutil
 import signal
+import subprocess
 import sys
 
 import gi
@@ -57,15 +64,33 @@ def main():
     ap.add_argument("--ignore-motion", action="store_true",
                     help="don't flip on pointer motion (for the viewer's "
                          "--latency-input cursor)")
+    ap.add_argument("--click", action="store_true",
+                    help="click on the default sound output at every flip "
+                         "(sound latency, needs sremfb-latency-click)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print every event")
     args = ap.parse_args()
+
+    clicker = None
+    if args.click:
+        here = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "sremfb-latency-click")
+        exe = here if os.access(here, os.X_OK) else \
+            shutil.which("sremfb-latency-click")
+        if not exe:
+            sys.exit("--click: sremfb-latency-click not found")
+        clicker = subprocess.Popen([exe], stdin=subprocess.PIPE, bufsize=0)
 
     app = Gtk.Application(application_id="fr.eng462.SremfbLatencyProbe",
                           flags=Gio.ApplicationFlags.NON_UNIQUE)
     state = {"i": 0, "n": 0, "last": None, "area": None}
 
     def flip(what):
+        if clicker:                    # the sound first, like a game would
+            try:
+                clicker.stdin.write(b"x")
+            except OSError:
+                pass
         state["i"] ^= 1
         state["n"] += 1
         state["area"].queue_draw()
@@ -125,6 +150,9 @@ def main():
     GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, on_sigint)
     app.connect("activate", activate)
     app.run([sys.argv[0]])
+    if clicker:
+        clicker.stdin.close()
+        clicker.wait(timeout=2)
     print("probe: %d flips" % state["n"], flush=True)
 
 

@@ -36,6 +36,8 @@ install-server: server-build
 		$(DESTDIR)/etc/udev/rules.d/60-sremfb-uinput.rules
 	install -D -m 755 tools/sremfb-latency-probe \
 		$(DESTDIR)$(PREFIX)/bin/sremfb-latency-probe
+	install -D -m 755 server/sremfb-latency-click \
+		$(DESTDIR)$(PREFIX)/bin/sremfb-latency-click
 	install -D -m 644 systemd/sremfb-evdi-perms.service \
 		$(DESTDIR)/etc/systemd/system/sremfb-evdi-perms.service
 	install -D -m 644 systemd/gdm-sremfb-evdi-purge.conf \

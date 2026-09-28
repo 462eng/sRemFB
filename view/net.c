@@ -4,7 +4,9 @@
  * Speaks protocol v2 exactly like the SBC client (see PROTOCOL.md), minus
  * the H.264 capability, which is never advertised: this viewer is meant
  * for latency-critical use and stays on the damage-rect RAW/LZ4 path.
- * It offers INPUT (unless --no-input); the main thread only sends input
+ * It offers INPUT (unless --no-input) and AUDIO (unless --no-audio: the
+ * sound then runs on its own UDP flow and thread, audio.c); the main
+ * thread only sends input
  * events once the server hello confirmed it (fb->input).
  *
  * Everything that can block — connect, reads, the reconnect backoff —
@@ -66,6 +68,7 @@ struct view_net {
     uint8_t srv_flags;
     int64_t ping_min_off_us;    /* min(arrival - server clock) seen */
     int have_ping_off;
+    uint16_t audio_token;
 };
 
 static uint64_t now_ns(void)
@@ -230,6 +233,8 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
     ch.flags |= SREMFB_HELLO_FLAG_FEEDBACK;
     if (!n->o.no_input)
         ch.flags |= SREMFB_HELLO_FLAG_INPUT;
+    if (!n->o.no_audio)
+        ch.flags |= SREMFB_HELLO_FLAG_AUDIO;
     /* never SREMFB_HELLO_FLAG_H264: no inter-frame codec in this viewer */
     ch.xres = (uint16_t)n->o.req_w;
     ch.yres = (uint16_t)n->o.req_h;
@@ -283,6 +288,7 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
     *w = sh.width;
     *h = sh.height;
     n->srv_flags = sh.flags;
+    n->audio_token = sh.audio_token;
     view_log("connected to %s: stream %ux%u %s (mac %02x:%02x:%02x:%02x:"
              "%02x:%02x)%s", n->o.server, *w, *h,
              sh.pixfmt == SREMFB_PIX_RGB565 ? "RGB565" : "XRGB8888",
@@ -294,6 +300,11 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
                  "accepted by the server" :
                  "not accepted by the server (SREMFB_INPUT off or older "
                  "server): view only");
+    if (!n->o.no_audio)
+        view_log("audio %s", (sh.flags & SREMFB_SRV_FLAG_AUDIO) ?
+                 "offered by the server" :
+                 "not offered by the server (SREMFB_AUDIO=0, no PipeWire "
+                 "or older server)");
     return 0;
 }
 
@@ -469,6 +480,17 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
     pthread_mutex_unlock(&n->wlock);
     sample_tcp_rtt(n);
 
+    /* sound: its own UDP flow and thread, to the same server address */
+    struct view_audio *audio = NULL;
+    if (!n->o.no_audio && (n->srv_flags & SREMFB_SRV_FLAG_AUDIO)) {
+        struct sockaddr_storage ss;
+        socklen_t sl = sizeof(ss);
+        if (getpeername(n->sock, (struct sockaddr *)&ss, &sl) == 0)
+            audio = view_audio_start((struct sockaddr *)&ss, sl,
+                                     n->audio_token, &n->o, n->st,
+                                     &n->fb->aprobe);
+    }
+
     while (!atomic_load(&n->stop)) {
         struct sremfb_frame_hdr hd;
         batch_flush_unless(n, &batch_t0, sizeof(hd));
@@ -571,6 +593,7 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
          * control message */
     }
 
+    view_audio_stop(audio);
     pthread_mutex_lock(&n->wlock);
     n->fd = -1;
     pthread_mutex_unlock(&n->wlock);

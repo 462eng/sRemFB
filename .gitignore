@@ -7,3 +7,4 @@ sremfb-test-*.ppm
 dist/
 pkg/sysroot/
 .claude/
+server/sremfb-latency-click

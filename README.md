@@ -69,7 +69,8 @@ helps.
   Pi 500, running in production at the author's.
 - **Multi-display per SBC** — drive both HDMI outputs of a Pi 4/5 as two
   independent monitors (or two VM heads).
-- **Audio** — carried separately from video, QoS-friendly.
+- **Audio** — done for `sremfb-view` (raw PCM over UDP, see below);
+  still to come: the SBC client, and a codec (Opus) for Wi-Fi.
 - **USB redirection into VMs** — today's USB teleport, extended to the
   thin-client scenario (usbredir).
 
@@ -190,6 +191,7 @@ screen "unplugs".
 | `SREMFB_USB_DENY` (client) | — | `vendor[:product]` ids never teleported |
 | `SREMFB_NO_USB` (server) | — | never attach clients' USB devices |
 | `SREMFB_INPUT` (server) | — | `1` = replay allowed clients' keyboard/mouse/gamepad on uinput devices (off by default) |
+| `SREMFB_AUDIO` (server) | `1` | `0` = no sound for the clients that ask (otherwise: one PipeWire output per client, the default while it is connected; UDP, same port) |
 
 The client runs as root by default (`/dev/fb0` access + console ioctls).
 The server runs as the session user: access to `/dev/dri/cardN` (the EVDI
@@ -296,9 +298,32 @@ sremfb-view [options] <server>       # sremfb-view --help for the details
   `--ignore-motion`). "rx" = pixel decoded, "shown" = after the
   local `SDL_RenderPresent`; the local compositor, scanout and the
   monitor's own lag are not counted.
+- **Sound** from the remote desktop (server ≥ 1.4.1+holo3, PipeWire):
+  while the viewer is connected, the server creates an output
+  "sRemFB <model>", makes it the **default output** (games, Steam, the
+  desktop move onto it) and puts the previous one back when it leaves.
+  Sound arrives as **raw PCM** 48 kHz stereo (no codec, no encoding
+  delay) on a separate UDP flow (same port number, opened by the viewer:
+  nothing to open in a client-side firewall), 2.7 ms packets, and goes
+  to this machine's default output through SDL3. **Short** buffer:
+  10 ms target (`--audio-buffer MS`), 128-frame device period
+  (`--audio-frames`); beyond target + 10 ms packets are **dropped** to
+  get back to it — latency never drifts; a lost packet = as much
+  silence; the drift between the two sound clocks is corrected smoothly
+  (±0.3 % at most). Measured on a 2.5 GbE link: about 15 ms from the
+  input event to the sound leaving the sound card (estimate, see
+  `--latency-test`). `--no-audio` to go without.
 - No gamepad rumble yet (force feedback not forwarded).
 - Disconnects handled like the SBC client: 6 s heartbeat, automatic
   reconnection with backoff.
+- `--stats`: with sound, an extra `audio:` line — packets/s, lost,
+  late, dropped, underruns, buffer depth, network delay (clocks aligned
+  by the UDP ECHOs), drift correction, estimated latency (network +
+  buffer + one packet + device period; the local sound server and DAC
+  not counted). `--latency-test` with `sremfb-latency-probe --click`:
+  every event also clicks in the server's default output, and the test
+  adds "snd rx" (click received) and "snd out" (click leaving the sound
+  card, estimated).
 - `--stats`: every 5 s on stderr, received and presented fps, MB/s, LZ4
   time, upload+present time, queueing delay estimated from the PINGs.
   `--dump N`: saves N frames as PPM (validation without a screen).

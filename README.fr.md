@@ -70,7 +70,8 @@ aide.
   frames pleines. Validé sur Pi 500, en prod chez l'auteur.
 - **Multi-écrans par SBC** — piloter les deux sorties HDMI d'un Pi 4/5
   comme deux moniteurs (ou deux têtes de VM) indépendants.
-- **Audio** — transport séparé du flux vidéo, avec QoS possible.
+- **Audio** — fait pour `sremfb-view` (PCM brut sur UDP, voir plus
+  bas) ; reste le client SBC, et un codec (Opus) pour le Wi-Fi.
 - **Redirection USB vers les VM** — le téléport USB actuel, étendu au
   scénario thin client (usbredir).
 
@@ -190,6 +191,7 @@ l'écran « se débranche ».
 | `SREMFB_USB_DENY` (client) | — | ids `vendor[:product]` jamais téléportés |
 | `SREMFB_NO_USB` (serveur) | — | ne jamais attacher les périphériques USB des clients |
 | `SREMFB_INPUT` (serveur) | — | `1` = rejouer clavier/souris/manette des clients admis sur des périphériques uinput (désactivé par défaut) |
+| `SREMFB_AUDIO` (serveur) | `1` | `0` = pas de son pour les clients qui le demandent (sinon : une sortie PipeWire par client, par défaut tant qu'il est connecté ; UDP même port) |
 
 Le client tourne en root par défaut (accès `/dev/fb0` + ioctl console).
 Le serveur tourne en user de session : l'accès à `/dev/dri/cardN`
@@ -301,9 +303,33 @@ sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
   lancée avec `--ignore-motion`). « rx » = pixel décodé, « shown » =
   après le `SDL_RenderPresent` local ; le compositeur local, le scanout
   et le retard propre de l'écran ne sont pas comptés.
+- **Son** du bureau distant (serveur ≥ 1.4.1+holo3, PipeWire) : tant
+  que la visionneuse est connectée, le serveur crée une sortie
+  « sRemFB <modèle> », en fait la **sortie par défaut** (jeux, Steam,
+  bureau y basculent) et remet l'ancienne au départ. Le son arrive en
+  **PCM brut** 48 kHz stéréo (aucun codec, aucun délai d'encodage) sur
+  un flux UDP à part (même numéro de port, ouvert par la visionneuse :
+  rien à ouvrir dans un pare-feu côté client), paquets de 2,7 ms, et part
+  vers la sortie son par défaut du poste via SDL3. Tampon **court** :
+  cible 10 ms (`--audio-buffer MS`), période de la carte 128 trames
+  (`--audio-frames`) ; au-delà de cible + 10 ms, des paquets sont
+  **jetés** pour y revenir — la latence ne dérive jamais ; paquet perdu
+  = silence de même durée ; la dérive entre les deux horloges son est
+  compensée en douceur (±0,3 % max). Mesuré sur un lien 2,5 GbE :
+  environ 15 ms de l'événement d'entrée au son sortant de la carte
+  (estimation, voir `--latency-test`). `--no-audio` pour s'en passer.
 - Pas encore de vibrations de manette (retour de force non transmis).
 - Déconnexions comme le client SBC : battement de cœur de 6 s,
   reconnexion automatique avec backoff.
+- `--stats` : avec le son, une ligne `audio:` en plus — paquets/s,
+  perdus, en retard, jetés, sous-alimentations, profondeur du tampon,
+  délai réseau (horloges recalées par les ECHO UDP), correction de
+  dérive, latence estimée (réseau + tampon + un paquet + période de la
+  carte ; serveur son et DAC locaux non comptés). `--latency-test` avec
+  `sremfb-latency-probe --click` : chaque événement produit aussi un
+  clic dans la sortie par défaut du serveur, et le test donne en plus
+  « snd rx » (clic reçu) et « snd out » (clic sortant de la carte,
+  estimé).
 - `--stats` : toutes les 5 s sur stderr, fps reçus et présentés, Mo/s,
   temps LZ4, temps upload+présentation, délai de file estimé depuis les
   PING. `--dump N` : sauve N frames en PPM (validation sans écran).
