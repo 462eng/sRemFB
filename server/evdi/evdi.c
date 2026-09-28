@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include <lz4.h>
@@ -36,6 +37,7 @@
 /* DRM constants, redeclared to avoid dragging libdrm headers in */
 #define DPMS_MODE_ON    0
 #define FOURCC_XR24     0x34325258u        /* DRM_FORMAT_XRGB8888 */
+#define DRM_IOCTL_DROP_MASTER_ _IO('d', 0x1f)  /* DRM_IOCTL_DROP_MASTER */
 
 /* backend-private state, hung off the generic core structs */
 #define EV(c)    ((SremfbEvdiClient *)(c)->src_ctx)
@@ -536,6 +538,13 @@ static gboolean acquire_card(SremfbClient *c, int i, const char *how)
     int lock_fd = open(path, O_RDWR | O_CLOEXEC);
     if (lock_fd < 0)
         return FALSE;
+    /* The first opener of a DRM primary node becomes its master. mutter
+     * hands an unused evdi card back to logind after a while (its fd
+     * stays open, but no longer master): our lock fd would then grab
+     * master and mutter's TakeDevice on hotplug fails for good with
+     * "Failed to reopen cardN: EBUSY". Never keep it. Harmless when
+     * someone else is already master (EINVAL/EACCES, ignored). */
+    (void)ioctl(lock_fd, DRM_IOCTL_DROP_MASTER_, 0);
     if (flock(lock_fd, LOCK_EX | LOCK_NB) < 0) {
         close(lock_fd);                /* claimed by another process/us */
         return FALSE;
