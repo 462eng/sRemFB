@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: EUPL-1.2
+# sRemFB — détachement usbip à l'arrêt.
+#
+# Inactif au boot (RemainAfterExit, rien à démarrer) : son rôle est
+# ExecStop=, joué à l'arrêt du système. After=network.target
+# network-online.target l'arrête AVANT le réseau : usbip detach ferme
+# chaque connexion TCP proprement et le client (usbip-host, sans
+# keepalive) remet aussitôt ses périphériques à disposition. Before= les
+# unités du réconciliateur : elles sont arrêtées d'abord, rien ne
+# rattache pendant le détachement. Pas de nouveau job à lancer pendant
+# le shutdown (qui peut être refusé) : le stop de cette unité fait
+# partie de la transaction d'arrêt.
+[Unit]
+Description=sRemFB USB teleport: detach usbip imports before the network goes down
+After=network.target network-online.target
+Before=sremfb-usb.path sremfb-usb.timer sremfb-usb.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/true
+ExecStop=/usr/local/libexec/sremfb-usb-attach --detach-all
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

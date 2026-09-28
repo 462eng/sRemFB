@@ -121,6 +121,8 @@ install -m 644 "$TOP/systemd/sremfb-usb.path" \
     "$ROOT/usr/lib/systemd/system/sremfb-usb.path"
 install -m 644 "$TOP/systemd/sremfb-usb.timer" \
     "$ROOT/usr/lib/systemd/system/sremfb-usb.timer"
+sed 's|/usr/local/libexec|/usr/libexec|' "$TOP/systemd/sremfb-usb-detach.service" \
+    > "$ROOT/usr/lib/systemd/system/sremfb-usb-detach.service"
 install -m 644 "$TOP/systemd/tmpfiles-sremfb.conf" \
     "$ROOT/usr/lib/tmpfiles.d/sremfb.conf"
 install -m 644 "$TOP/systemd/61-sremfb-display-vendor.hwdb" \
@@ -140,6 +142,9 @@ install -m 644 "$TOP/systemd/modprobe-sremfb.conf" \
     "$ROOT/etc/modprobe.d/sremfb.conf"
 install -m 644 "$TOP/systemd/sremfb-server.conf.example" \
     "$ROOT/etc/sremfb-server.conf"
+# unités produites par sed : 644 quel que soit l'umask
+chmod 644 "$ROOT"/usr/lib/systemd/system/*.service \
+    "$ROOT"/usr/lib/systemd/user/*.service
 mkdir -p "$ROOT/DEBIAN"
 printf '/etc/modules-load.d/sremfb.conf\n/etc/modprobe.d/sremfb.conf\n/etc/sremfb-server.conf\n' \
     > "$ROOT/DEBIAN/conffiles"
@@ -160,6 +165,8 @@ if command -v systemctl >/dev/null 2>&1; then
     # téléport USB : /run/sremfb + réconciliateur usbip (root)
     systemd-tmpfiles --create /usr/lib/tmpfiles.d/sremfb.conf 2>/dev/null || true
     systemctl enable --now sremfb-usb.path sremfb-usb.timer 2>/dev/null || true
+    # détachement usbip à l'arrêt (ExecStop=, avant la coupure du réseau)
+    systemctl enable --now sremfb-usb-detach.service 2>/dev/null || true
 fi
 # secours si systemd absent (chroot, etc.)
 if [ -e /sys/devices/evdi/add ]; then
@@ -170,12 +177,23 @@ echo "sremfb-server : plages autorisées dans /etc/sremfb-server.conf, puis :"
 echo "  systemctl --user enable --now sremfb-server"
 EOF
 chmod 755 "$ROOT/DEBIAN/postinst"
+# prerm : le script de détachement existe encore, les ports importés
+# sont rendus proprement avant la suppression des fichiers
+cat > "$ROOT/DEBIAN/prerm" <<'EOF'
+#!/bin/sh -e
+if [ "$1" = remove ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl disable --now sremfb-usb.path sremfb-usb.timer 2>/dev/null || true
+    systemctl disable --now sremfb-usb-detach.service 2>/dev/null || true
+fi
+EOF
+chmod 755 "$ROOT/DEBIAN/prerm"
 cat > "$ROOT/DEBIAN/postrm" <<'EOF'
 #!/bin/sh -e
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     if command -v systemctl >/dev/null 2>&1; then
         systemctl disable --now sremfb-evdi-perms.service 2>/dev/null || true
         systemctl disable --now sremfb-usb.path sremfb-usb.timer 2>/dev/null || true
+        systemctl disable sremfb-usb-detach.service 2>/dev/null || true
     fi
 fi
 EOF
@@ -207,6 +225,7 @@ for arch in arm64 armhf; do
     install -m 755 "$STAGE/sremfb-client-$arch" "$ROOT/usr/bin/sremfb-client"
     sed 's|/usr/local/bin|/usr/bin|' "$TOP/systemd/sremfb-client.service" \
         > "$ROOT/usr/lib/systemd/system/sremfb-client.service"
+    chmod 644 "$ROOT/usr/lib/systemd/system/sremfb-client.service"
     install -m 644 "$TOP/systemd/sremfb.conf.example" "$ROOT/etc/sremfb.conf"
     install -m 644 "$TOP/systemd/sremfb.conf.example" \
         "$ROOT/usr/share/sremfb-client/sremfb.conf.example"

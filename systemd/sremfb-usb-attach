@@ -11,6 +11,13 @@
 # sont tenus par usbip attach/detach). Déclenché par sremfb-usb.path à
 # chaque changement de /run/sremfb et par sremfb-usb.timer (rattrapage,
 # hotplug USB côté client).
+#
+# --detach-all : détache tous les ports importés, pair présent ou non.
+# Appelé par sremfb-usb-detach.service à l'arrêt (ExecStop=, ordonné
+# avant la coupure du réseau) : usbip detach ferme proprement la
+# connexion TCP, le client libère aussitôt ses stubs (sinon usbip-host,
+# sans keepalive, les garde « utilisés » pour une connexion morte et
+# usbipd ne les réannonce plus au redémarrage du serveur).
 
 command -v usbip >/dev/null 2>&1 || exit 0
 modprobe vhci-hcd 2>/dev/null || true
@@ -21,6 +28,25 @@ port_used() {
     awk -v p="$1" '$2 + 0 == p + 0 && $3 + 0 == 6 { f = 1 } END { exit !f }' \
         /sys/devices/platform/vhci_hcd.0/status* 2>/dev/null
 }
+
+# --- arrêt : tout détacher ------------------------------------------------
+if [ "${1:-}" = --detach-all ]; then
+    for rec in /var/run/vhci_hcd/port*; do
+        [ -f "$rec" ] || continue
+        port=${rec##*port}
+        if ! port_used "$port"; then
+            rm -f "$rec"
+            continue
+        fi
+        read -r host _ busid < "$rec" || host=?
+        if usbip detach -p "$port" >/dev/null 2>&1; then
+            logger -t sremfb-usb "detached $busid from $host (port $port)"
+        else
+            logger -t sremfb-usb "detach of port $port ($host) failed"
+        fi
+    done
+    exit 0
+fi
 
 # --- purge/détachement ---------------------------------------------------
 for rec in /var/run/vhci_hcd/port*; do

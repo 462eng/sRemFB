@@ -50,12 +50,15 @@ install-server: server-build
 		$(DESTDIR)/etc/systemd/system/sremfb-usb.path
 	install -D -m 644 systemd/sremfb-usb.timer \
 		$(DESTDIR)/etc/systemd/system/sremfb-usb.timer
+	install -D -m 644 systemd/sremfb-usb-detach.service \
+		$(DESTDIR)/etc/systemd/system/sremfb-usb-detach.service
 	install -D -m 644 systemd/tmpfiles-sremfb.conf \
 		$(DESTDIR)/etc/tmpfiles.d/sremfb.conf
 	-systemd-tmpfiles --create /etc/tmpfiles.d/sremfb.conf
 	-systemctl daemon-reload && \
 		systemctl enable --now sremfb-evdi-perms.service && \
-		systemctl enable --now sremfb-usb.path sremfb-usb.timer
+		systemctl enable --now sremfb-usb.path sremfb-usb.timer \
+			sremfb-usb-detach.service
 	-chgrp video /sys/devices/evdi/add /sys/devices/evdi/remove_all 2>/dev/null && \
 		chmod 664 /sys/devices/evdi/add /sys/devices/evdi/remove_all
 	@test -f $(DESTDIR)/etc/sremfb-server.conf || \
