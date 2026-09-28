@@ -452,7 +452,11 @@ void sremfb_evdi_reset(unsigned count)
 
     g_snprintf(marker, sizeof(marker), "%s/sremfb-evdi-reset",
                rundir && *rundir ? rundir : "/run");
-    if (g_file_test(marker, G_FILE_TEST_EXISTS)) {
+    /* The marker only protects devices the compositor holds: when none
+     * is left (removed on purpose, e.g. a game mode that unplugs the
+     * cards for VR, or a new session that kept $XDG_RUNTIME_DIR), a
+     * restart must create them again instead of waiting forever. */
+    if (g_file_test(marker, G_FILE_TEST_EXISTS) && sremfb_evdi_probe()) {
         g_message("evdi reset skipped: restart (keeping the devices the "
                   "compositor already holds open)");
         return;
