@@ -907,7 +907,7 @@ static int test_step(void)
 #define LAT_TIMEOUT_MS   1000
 #define LAT_SETTLE_MS    60000     /* max wait for the probe */
 
-enum { LAT_KEY, LAT_ABS, LAT_REL };
+enum { LAT_KEY, LAT_ABS, LAT_REL, LAT_CURSOR };
 
 static struct {
     unsigned n;                 /* trials wanted, 0 = off */
@@ -919,6 +919,9 @@ static struct {
     Uint64 phase_ms;
     uint64_t t0_ns;
     int toggle;
+    int cx, cy;                 /* LAT_CURSOR: probe pixel */
+    int parkx, parky;           /* pointer rest position, near the probe
+                                   pixel (inside the probe window) */
     Uint64 click_ms;
 } LAT = { .px = -1, .py = -1 };
 
@@ -932,14 +935,25 @@ static void lat_send(void)
     case LAT_ABS:
         LAT.toggle ^= 1;
         in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X,
-                (int)FB.w / 4 + (LAT.toggle ? 60 : 0));
-        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, (int)FB.h / 4);
+                LAT.parkx + (LAT.toggle ? 60 : 0));
+        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, LAT.parky);
         in_syn(SREMFB_INDEV_POINTER);
         break;
     case LAT_REL:
         LAT.toggle ^= 1;
         in_push(SREMFB_INDEV_MOUSE, EV_REL, REL_X, LAT.toggle ? 40 : -40);
         in_syn(SREMFB_INDEV_MOUSE);
+        break;
+    case LAT_CURSOR:                    /* the remote cursor itself onto /
+                                           off the probe pixel (its tip is
+                                           the hotspot: aim just above-left
+                                           so the pixel is inside the arrow) */
+        LAT.toggle ^= 1;
+        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X,
+                LAT.toggle ? LAT.cx - 1 : LAT.parkx);
+        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y,
+                LAT.toggle ? LAT.cy - 6 : LAT.parky);
+        in_syn(SREMFB_INDEV_POINTER);
         break;
     }
 }
@@ -997,14 +1011,17 @@ static int lat_step(void)
         LAT.phase = 1;
         LAT.phase_ms = now;
         LAT.click_ms = now + 1000;      /* devices: let libinput add them */
-        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X, (int)w / 4);
-        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, (int)h / 4);
+        LAT.parkx = px >= 240 ? px - 240 : px + 100;
+        LAT.parky = py >= 240 ? py - 240 : py + 100;
+        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X, LAT.parkx);
+        in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, LAT.parky);
         in_syn(SREMFB_INDEV_POINTER);
         in_flush();
         view_log("latency: %u trials (%s), probe pixel %d,%d — waiting "
                  "for the probe",
                  LAT.n, LAT.kind == LAT_KEY ? "key" :
-                 LAT.kind == LAT_ABS ? "absolute pointer" : "relative mouse",
+                 LAT.kind == LAT_ABS ? "absolute pointer" :
+                 LAT.kind == LAT_REL ? "relative mouse" : "remote cursor",
                  px, py);
         return 0;
     case 1:                             /* wait for the probe: click it
@@ -1038,8 +1055,8 @@ static int lat_step(void)
             pthread_mutex_unlock(&FB.lock);
             /* position again: the first one may predate the server's
              * view of our screen (it drops those, and the clicks) */
-            in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X, (int)w / 4);
-            in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, (int)h / 4 + 1);
+            in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_X, LAT.parkx);
+            in_push(SREMFB_INDEV_POINTER, EV_ABS, ABS_Y, LAT.parky + 1);
             in_syn(SREMFB_INDEV_POINTER);
             in_push(SREMFB_INDEV_POINTER, EV_KEY, BTN_LEFT, 1);
             in_syn(SREMFB_INDEV_POINTER);
@@ -1060,6 +1077,8 @@ static int lat_step(void)
         FB.probe_armed = 1;
         pthread_mutex_unlock(&FB.lock);
         D.probe_shown_ns = 0;
+        LAT.cx = px;
+        LAT.cy = py;
         LAT.t0_ns = now_ns();
         lat_send();
         in_flush();
@@ -1101,7 +1120,8 @@ static int lat_step(void)
             printf("latency (%s, %ux%u, %u ok, %u lost):\n",
                    LAT.kind == LAT_KEY ? "key" :
                    LAT.kind == LAT_ABS ? "absolute pointer" :
-                   "relative mouse", w, h, LAT.done, LAT.lost);
+                   LAT.kind == LAT_REL ? "relative mouse" : "remote cursor",
+                   w, h, LAT.done, LAT.lost);
             lat_print("rx", LAT.rx_ms, LAT.done);
             lat_print("shown", LAT.shown_ms, LAT.done);
             fflush(stdout);
@@ -1223,8 +1243,10 @@ static void usage(FILE *out)
 "      --latency-test N measure input-to-picture latency over N trials\n"
 "                       (needs sremfb-latency-probe on the server's\n"
 "                       virtual screen), print min/median/p95/max, quit\n"
-"      --latency-input key|abs|rel\n"
-"                       event used by the test (default key: Left Shift)\n"
+"      --latency-input key|abs|rel|cursor\n"
+"                       event used by the test (default key: Left Shift;\n"
+"                       cursor = the remote cursor reaching the probe\n"
+"                       pixel, probe started with --ignore-motion)\n"
 "      --latency-at X,Y probe pixel (default: 3/4 of the stream)\n"
 "      --test SCRIPT    scripted input, \"cmd; cmd...\" (validation, see\n"
 "                       the source: wait, key, type, abs, rel, click,\n"
@@ -1341,8 +1363,10 @@ static void parse_args(int argc, char **argv)
                 LAT.kind = LAT_ABS;
             } else if (strcmp(optarg, "rel") == 0) {
                 LAT.kind = LAT_REL;
+            } else if (strcmp(optarg, "cursor") == 0) {
+                LAT.kind = LAT_CURSOR;
             } else {
-                fprintf(stderr, "sremfb-view: --latency-input key|abs|rel\n");
+                fprintf(stderr, "sremfb-view: --latency-input key|abs|rel|cursor\n");
                 exit(2);
             }
             break;

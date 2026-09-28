@@ -278,8 +278,10 @@ sremfb-view [options] <server>       # sremfb-view --help for the details
   → decoded here, on the viewer's clock alone, against
   `sremfb-latency-probe` (package tool, python3-gi + GTK 4) running
   fullscreen on the virtual screen: min/median/p95/max over N trials,
-  for a key (`--latency-input key`), the absolute pointer (`abs`) or the
-  relative mouse (`rel`). "rx" = pixel decoded, "shown" = after the
+  for a key (`--latency-input key`), the absolute pointer (`abs`), the
+  relative mouse (`rel`) — the probe window's reaction — or the remote
+  cursor itself reaching the probe pixel (`cursor`, probe started with
+  `--ignore-motion`). "rx" = pixel decoded, "shown" = after the
   local `SDL_RenderPresent`; the local compositor, scanout and the
   monitor's own lag are not counted.
 - No gamepad rumble yet (force feedback not forwarded).

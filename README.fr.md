@@ -281,8 +281,10 @@ sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
   décodé ici, sur la seule horloge de la visionneuse, face à
   `sremfb-latency-probe` (outil du paquet, python3-gi + GTK 4) lancé en
   plein écran sur l'écran virtuel : min/médiane/p95/max sur N essais,
-  pour une touche (`--latency-input key`), le pointeur absolu (`abs`)
-  ou la souris relative (`rel`). « rx » = pixel décodé, « shown » =
+  pour une touche (`--latency-input key`), le pointeur absolu (`abs`),
+  la souris relative (`rel`) — la réaction de la fenêtre sonde — ou le
+  curseur distant lui-même atteignant le pixel sonde (`cursor`, sonde
+  lancée avec `--ignore-motion`). « rx » = pixel décodé, « shown » =
   après le `SDL_RenderPresent` local ; le compositeur local, le scanout
   et le retard propre de l'écran ne sont pas comptés.
 - Pas encore de vibrations de manette (retour de force non transmis).

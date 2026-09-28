@@ -8,7 +8,8 @@ event, then watches the probe pixel in the frames it receives: the delay
 covers input transport, the server's compositor and this window's
 rendering, capture, and the network back — all on the viewer's clock.
 
-    sremfb-latency-probe [--connector DVI-I-2] [--timeout S] [-v]
+    sremfb-latency-probe [--connector DVI-I-2] [--timeout S]
+                         [--ignore-motion] [-v]
 
 Without --connector, picks the monitor whose model says "sremfb" (the
 viewer's default EDID model), else the only DVI-I-* connector (EVDI).
@@ -53,6 +54,9 @@ def main():
     ap.add_argument("--connector", help="monitor connector, e.g. DVI-I-2")
     ap.add_argument("--timeout", type=float, default=0,
                     help="quit after S seconds (default: never)")
+    ap.add_argument("--ignore-motion", action="store_true",
+                    help="don't flip on pointer motion (for the viewer's "
+                         "--latency-input cursor)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="print every event")
     args = ap.parse_args()
@@ -83,7 +87,7 @@ def main():
     def on_motion(_ctl, x, y):
         pos = (round(x), round(y))
         if pos != state["last"]:
-            if state["last"] is not None:
+            if state["last"] is not None and not args.ignore_motion:
                 flip("motion %d,%d" % pos)
             state["last"] = pos
 
