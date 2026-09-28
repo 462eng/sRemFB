@@ -135,7 +135,7 @@ static void layout_parse(GVariant *res)
 
         /* mirrored monitors share one logical monitor: same rect */
         g_variant_iter_init(&si, specs);
-        while (g_variant_iter_next(&si, "(&sss)", &conn, NULL, NULL, NULL)) {
+        while (g_variant_iter_next(&si, "(&s&s&s&s)", &conn, NULL, NULL, NULL)) {
             const int *wh = g_hash_table_lookup(modes, conn);
             if (!w && wh) {
                 w = wh[0];
