@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 #ifndef SREMFB_CORE_H
 #define SREMFB_CORE_H
 

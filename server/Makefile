@@ -8,6 +8,7 @@ CFLAGS ?= -O2 -g
 CFLAGS += -Wall -Wextra -Wno-unused-parameter -I.. -Icore -Ievdi \
           $(shell pkg-config --cflags $(PKGS))
 LDLIBS = $(shell pkg-config --libs $(PKGS)) -levdi -lm
+VERSION ?= $(shell git describe --tags --always 2>/dev/null || echo dev)
 
 CORE_OBJS = core/net.o core/convert.o core/control.o core/encoder.o \
             core/xmit.o core/session.o core/input.o \
@@ -25,6 +26,8 @@ sremfb-latency-click: ../tools/sremfb-latency-click.c
 
 $(CORE_OBJS): core/core.h core/source.h ../protocol.h
 $(EVDI_OBJS): core/core.h core/source.h evdi/evdi.h ../protocol.h
+
+main-evdi.o: CFLAGS += -DSREMFB_VERSION='"$(VERSION)"'
 
 clean:
 	rm -f sremfb-server sremfb-latency-click rfb-server *.o core/*.o evdi/*.o

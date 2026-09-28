@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>

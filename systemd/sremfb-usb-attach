@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: EUPL-1.2
 # sRemFB — réconciliateur usbip (root).
 #
 # Les clients sremfb qui exportent leurs périphériques USB (usbipd, flag

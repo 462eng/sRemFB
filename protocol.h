@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sRemFB — simple Remote Frame Buffer. Wire protocol shared by server
  * and client.

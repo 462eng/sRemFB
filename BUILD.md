@@ -126,16 +126,17 @@ targets.
 
 ## Debian packages
 
-`pkg/build-debs.sh` produces three `.deb`s in `dist/`:
+`pkg/build-debs.sh` produces four `.deb`s in `dist/`:
 
 | Package | Arch | Target |
 |---|---|---|
 | `sremfb-server` | amd64 | GNOME/Wayland PC |
 | `sremfb-client` | arm64 | 64-bit SBC (Pi 3/4/5/500, etc.) |
 | `sremfb-client` | armhf | ARMv7 SBC (Banana Pi M1+, Pi 2, etc.) |
+| `sremfb-view` | amd64 | Linux PC (SDL3 windowed viewer) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.4.1 by default
+./pkg/build-debs.sh              # version 1.5.0 by default
 ./pkg/build-debs.sh 3.1.0        # explicit version
 ```
 
@@ -156,6 +157,9 @@ Details:
   sudo apt update
   ```
 
+- **Viewer**: built with `make -C view` (needs `libsdl3-dev`); its
+  dependencies (`libsdl3-0`, `liblz4-1`, `libc6`) are computed by
+  `dpkg-shlibdeps` (package `dpkg-dev`). amd64 only.
 - **The kernel module is not repackaged**: `evdi-dkms` exists in Debian
   and is only needed on the server side (declared as a `Depends`).
 - The packages **replace** the old `rfb-server`/`rfb-client`
@@ -174,9 +178,11 @@ override it with the `MAINT` environment variable
 
 ```sh
 # server
-sudo apt install ./dist/sremfb-server_1.4.1_amd64.deb
+sudo apt install ./dist/sremfb-server_1.5.0_amd64.deb
 # client (on the SBC)
-sudo apt install ./dist/sremfb-client_1.4.1_arm64.deb
+sudo apt install ./dist/sremfb-client_1.5.0_arm64.deb
+# viewer (on a desktop PC)
+sudo apt install ./dist/sremfb-view_1.5.0_amd64.deb
 ```
 
 On an already-modified config, `dpkg -i --force-confold` keeps the

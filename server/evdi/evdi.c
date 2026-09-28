@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * EVDI backend: each client's virtual screen is a real DRM connector
  * provided by the evdi kernel module (DisplayLink's driver, packaged as

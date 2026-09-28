@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /* USB teleport, client side — see usbexport.h. Pure sysfs + fork/exec
  * (modprobe, usbipd), no library. Runs as root like the rest of the
  * client (framebuffer + console ioctls). */

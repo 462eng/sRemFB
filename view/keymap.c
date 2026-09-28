@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * SDL scancode -> Linux evdev key code, for the server's uinput keyboard.
  *

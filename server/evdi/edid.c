@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Minimal EDID 1.4 block for the virtual connector.
  *

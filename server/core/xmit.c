@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Per-client non-blocking transmit (the head-of-line fix, 1.2.0).
  *

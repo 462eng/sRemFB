@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Input injection: the client's keyboard, mouse and gamepad, replayed on
  * uinput devices of the server's seat — the desktop (libinput / mutter,

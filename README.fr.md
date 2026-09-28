@@ -304,7 +304,7 @@ sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
   lancée avec `--ignore-motion`). « rx » = pixel décodé, « shown » =
   après le `SDL_RenderPresent` local ; le compositeur local, le scanout
   et le retard propre de l'écran ne sont pas comptés.
-- **Son** du bureau distant (serveur ≥ 1.4.1+holo3, PipeWire) : tant
+- **Son** du bureau distant (serveur ≥ 1.5.0, PipeWire) : tant
   que la visionneuse est connectée, le serveur crée une sortie
   « sRemFB <modèle> », en fait la **sortie par défaut** (jeux, Steam,
   bureau y basculent) et remet l'ancienne au départ. Le son arrive en
@@ -413,4 +413,6 @@ que seul l'écran virtuel est actif.
 
 ## Licence
 
-[MIT](LICENSE) — © 2026 Jonathan Roth.
+EUPL 1.2 — texte anglais dans [`LICENSE`](LICENSE), texte français dans
+[`LICENSE.fr`](LICENSE.fr), les deux font foi.
+Copyright (c) 2026 Jonathan Roth.

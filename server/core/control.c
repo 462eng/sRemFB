@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Pressure controller: measures congestion as *delay* and decides, per
  * client, when the raw damage-rect path can't hold ~15 delivered fps and

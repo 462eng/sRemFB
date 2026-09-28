@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Hardware H.264 decoding through a V4L2 stateful memory-to-memory
  * decoder (pure ioctls, no library) — on a Raspberry Pi 3 this is

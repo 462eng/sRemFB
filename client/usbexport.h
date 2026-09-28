@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * USB teleport, client side: binds the SBC's eligible USB devices to the
  * usbip-host driver and makes sure usbipd serves them on TCP 3240 — the

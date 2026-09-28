@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sremfb-view audio: the server's desktop sound, received as raw PCM over
  * UDP (see protocol.h, SREMFB_SRV_FLAG_AUDIO) and played through an SDL3

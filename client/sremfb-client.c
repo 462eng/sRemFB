@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sremfb-client — receives frames over TCP and writes them to /dev/fb0.
  *
@@ -1196,10 +1197,14 @@ out:
 
 /* ------------------------------------------------------------- main */
 
+#ifndef SREMFB_VERSION
+#define SREMFB_VERSION "dev"
+#endif
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-            "usage: %s [--usb|--no-usb] [server] [port]\n"
+            "usage: %s [-V] [--usb|--no-usb] [server] [port]\n"
             "       %s --test WxH [server] [port]\n"
             "env: SREMFB_SERVER SREMFB_PORT SREMFB_FBDEV SREMFB_TTY\n"
             "     SREMFB_WRITE_MODE SREMFB_MAC SREMFB_MODEL SREMFB_NO_LZ4\n"
@@ -1232,7 +1237,11 @@ int main(int argc, char **argv)
             usb_mode = 1;
         else if (strcmp(argv[argi], "--no-usb") == 0)
             usb_mode = 0;
-        else
+        else if (strcmp(argv[argi], "-V") == 0 ||
+                 strcmp(argv[argi], "--version") == 0) {
+            printf("sremfb-client %s\n", SREMFB_VERSION);
+            return 0;
+        } else
             break;
         argi++;
     }
@@ -1264,6 +1273,8 @@ int main(int argc, char **argv)
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
     signal(SIGPIPE, SIG_IGN);
+
+    logmsg("sremfb-client %s", SREMFB_VERSION);
 
     if (dectest) {
         if (fb_open() < 0)

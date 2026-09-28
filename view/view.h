@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sremfb-view — shared state between the network thread (net.c) and the
  * SDL main thread (sremfb-view.c).

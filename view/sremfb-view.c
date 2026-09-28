@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sremfb-view — windowed sRemFB viewer for Linux desktops (SDL3, native
  * Wayland). Plugs a virtual monitor into a remote sremfb-server exactly

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * H.264 encoder (libx264) for the adaptive-compression path.
  *

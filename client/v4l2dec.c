@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * V4L2 stateful decoder backend (see v4l2dec.h). The dance, per the
  * kernel's stateful-decoder interface:

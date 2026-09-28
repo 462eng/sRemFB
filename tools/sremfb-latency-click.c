@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sremfb-latency-click — the sound half of `sremfb-view --latency-test`.
  *

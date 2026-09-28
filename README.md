@@ -299,7 +299,7 @@ sremfb-view [options] <server>       # sremfb-view --help for the details
   `--ignore-motion`). "rx" = pixel decoded, "shown" = after the
   local `SDL_RenderPresent`; the local compositor, scanout and the
   monitor's own lag are not counted.
-- **Sound** from the remote desktop (server ≥ 1.4.1+holo3, PipeWire):
+- **Sound** from the remote desktop (server ≥ 1.5.0, PipeWire):
   while the viewer is connected, the server creates an output
   "sRemFB <model>", makes it the **default output** (games, Steam, the
   desktop move onto it) and puts the previous one back when it leaves.
@@ -403,4 +403,6 @@ active.
 
 ## License
 
-[MIT](LICENSE) — © 2026 Jonathan Roth.
+EUPL 1.2 — English text in [`LICENSE`](LICENSE), French text in
+[`LICENSE.fr`](LICENSE.fr); both are equally authentic.
+Copyright (c) 2026 Jonathan Roth.

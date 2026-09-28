@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * sremfb-server — the EVDI binary. Exposes one EVDI virtual connector per
  * connected sremfb-client on a GNOME/Wayland host. All the client-session
@@ -8,6 +9,10 @@
 #include <stdlib.h>
 
 #include "evdi.h"
+
+#ifndef SREMFB_VERSION
+#define SREMFB_VERSION "dev"
+#endif
 
 int main(int argc, char **argv)
 {
@@ -24,8 +29,12 @@ int main(int argc, char **argv)
             port = atol(argv[++i]);
         } else if (g_strcmp0(argv[i], "--allow") == 0 && i + 1 < argc) {
             allow = argv[++i];
+        } else if (g_strcmp0(argv[i], "-V") == 0 ||
+                   g_strcmp0(argv[i], "--version") == 0) {
+            g_print("sremfb-server %s\n", SREMFB_VERSION);
+            return 0;
         } else {
-            g_printerr("usage: %s [--port N] [--allow CIDR,CIDR...]\n"
+            g_printerr("usage: %s [-V] [--port N] [--allow CIDR,CIDR...]\n"
                        "  (env: SREMFB_PORT, SREMFB_ALLOW, SREMFB_INPUT=1, "
                        "SREMFB_AUDIO=0, SREMFB_LAYOUT=0)\n",
                        argv[0]);
@@ -37,6 +46,7 @@ int main(int argc, char **argv)
         return 2;
     }
     server.port = (uint16_t)port;
+    g_message("sremfb-server %s", SREMFB_VERSION);
 
     /* input injection is opt-in: only an explicit SREMFB_INPUT=1 */
     env = getenv("SREMFB_INPUT");

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Source-agnostic client session: accept + hello, the per-client TCP
  * lifecycle, USB-teleport peer files, and the listen/main-loop driver.

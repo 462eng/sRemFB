@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: EUPL-1.2 */
 /*
  * Audio: what the server's desktop plays, streamed to the client that asked
  * for it (SREMFB_HELLO_FLAG_AUDIO) as raw PCM over UDP — no codec, no

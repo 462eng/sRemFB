@@ -1,8 +1,10 @@
 #!/bin/sh -e
+# SPDX-License-Identifier: EUPL-1.2
 # Construit les paquets Debian de sRemFB dans dist/ :
 #   sremfb-server_<ver>_amd64.deb         (PC GNOME/Wayland)
 #   sremfb-client_<ver>_arm64.deb         (SBC 64 bits : Pi 3/4/5/500…)
 #   sremfb-client_<ver>_armhf.deb         (SBC ARMv7 : Banana Pi M1+, Pi 2…)
+#   sremfb-view_<ver>_amd64.deb           (visionneuse fenêtrée SDL3, PC)
 #
 # Le client est lié en STATIQUE avec liblz4 (extraite des paquets Debian
 # de la cible, mises en cache dans pkg/sysroot/) : il ne dépend que de
@@ -11,9 +13,10 @@
 # n'est nécessaire que côté serveur (déclaré en dépendance).
 #
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
-# architectures arm64/armhf activées dans dpkg pour apt-get download.
+# architectures arm64/armhf activées dans dpkg pour apt-get download ;
+# libsdl3-dev et dpkg-dev (dpkg-shlibdeps) pour la visionneuse.
 
-VERSION=${1:-1.4.1}
+VERSION=${1:-1.5.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
@@ -38,11 +41,12 @@ fetch_lz4 armhf
 
 # --- binaires -----------------------------------------------------------
 echo "== build serveur (amd64)"
-make -s -C "$TOP/server"
+make -s -B -C "$TOP/server" VERSION="$VERSION"
 
 build_client() { # $1 = debian arch, $2 = triplet gcc
     echo "== build client ($1)"
     "$2-gcc" -O2 -Wall -Wextra -pthread -I"$TOP" \
+        -DSREMFB_VERSION="\"$VERSION\"" \
         -I"$SYSROOT/$1/usr/include" \
         -o "$STAGE/sremfb-client-$1" \
         "$TOP/client/sremfb-client.c" "$TOP/client/v4l2dec.c" \
@@ -50,12 +54,36 @@ build_client() { # $1 = debian arch, $2 = triplet gcc
         "$SYSROOT/$1/usr/lib/$2/liblz4.a"
     "$2-strip" "$STAGE/sremfb-client-$1"
 }
+echo "== build visionneuse (amd64)"
+make -s -B -C "$TOP/view" VERSION="$VERSION"
+
 build_client arm64 aarch64-linux-gnu
 build_client armhf arm-linux-gnueabihf
 
 # --- assemblage ---------------------------------------------------------
+# /usr/share/doc/<paquet>/copyright (format DEP-5) : EUPL-1.2, texte
+# anglais complet (LICENSE) ; le texte français fait également foi.
+install_copyright() { # $1 = nom du paquet ; l'arborescence est dans $ROOT
+    mkdir -p "$ROOT/usr/share/doc/$1"
+    {
+        printf 'Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/\n'
+        printf 'Upstream-Name: sRemFB\n'
+        printf 'Source: https://github.com/462eng/sRemFB\n\n'
+        printf 'Files: *\n'
+        printf 'Copyright: 2026 Jonathan Roth\n'
+        printf 'License: EUPL-1.2\n\n'
+        printf 'License: EUPL-1.2\n'
+        printf ' The English (LICENSE) and French (LICENSE.fr) texts in the source\n'
+        printf ' tree are equally authentic. English text follows.\n .\n'
+        sed 's/^[[:space:]]*$/./; s/^/ /' "$TOP/LICENSE"
+    } > "$ROOT/usr/share/doc/$1/copyright"
+    chmod 644 "$ROOT/usr/share/doc/$1/copyright"
+}
+
 make_deb() { # $1 = nom, $2 = arch ; l'arborescence est déjà dans $ROOT
+    install_copyright "$1"
     mkdir -p "$ROOT/DEBIAN"
+    find "$ROOT" -type d -exec chmod 755 {} +   # indépendant de l'umask
     cat > "$ROOT/DEBIAN/control" <<EOF
 Package: $1
 Version: $VERSION
@@ -212,6 +240,28 @@ Description: sRemFB, écran virtuel réseau — client framebuffer
  usbip requis pour cette fonction).
  LZ4 lié en statique : aucune autre dépendance obligatoire."
 done
+
+# ---- sremfb-view (amd64) ----
+# arborescence sous debian/<paquet>/ : c'est là que dpkg-shlibdeps attend
+# les binaires qu'il analyse
+ROOT=$STAGE/view/debian/sremfb-view
+mkdir -p "$ROOT/usr/bin"
+install -m 755 "$TOP/view/sremfb-view" "$ROOT/usr/bin/sremfb-view"
+strip "$ROOT/usr/bin/sremfb-view"
+printf 'Source: sremfb\n\nPackage: sremfb-view\nArchitecture: amd64\n' \
+    > "$STAGE/view/debian/control"
+VIEW_DEPS=$(cd "$STAGE/view" && dpkg-shlibdeps -O \
+    -e"debian/sremfb-view/usr/bin/sremfb-view" 2>/dev/null |
+    sed -n 's/^shlibs:Depends=//p')
+[ -n "$VIEW_DEPS" ] || VIEW_DEPS="libc6, liblz4-1, libsdl3-0"
+make_deb sremfb-view amd64 \
+"Depends: $VIEW_DEPS
+Description: sRemFB, écran virtuel réseau — visionneuse fenêtrée
+ Branche un écran virtuel sur un sremfb-server et l'affiche dans une
+ fenêtre (SDL3, Wayland natif ou X11) sur un PC Linux. Relaie clavier,
+ souris et manette quand le serveur l'autorise (SREMFB_INPUT=1) et joue
+ le son du bureau distant (serveur ≥ 1.5.0). Avec un serveur plus ancien :
+ image seule."
 
 echo "== paquets dans $DIST :"
 ls -l "$DIST"
