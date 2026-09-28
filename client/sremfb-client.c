@@ -1327,6 +1327,8 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (C.usb_active)
+            usb_export_reclaim();   /* stubs orphaned by a dead server */
         if (hello_exchange(fd) == 0) {
             backoff = 1;
             frame_loop(fd);

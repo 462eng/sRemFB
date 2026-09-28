@@ -126,6 +126,14 @@ aide.
   (`SREMFB_USB=1` ou `--usb` pour forcer). Requiert le paquet `usbip`
   des deux côtés ; `usbipd` écoute sur le port 3240 du SBC — même
   modèle de confiance que le reste (LAN dédié).
+  usbip n'ayant pas de keepalive TCP, un serveur disparu sans détacher
+  (redémarrage, coupure de courant) laisserait les périphériques du SBC
+  « utilisés » par une connexion morte : le paquet serveur détache tout
+  à l'arrêt du système, avant la coupure du réseau (unité
+  `sremfb-usb-detach`), et le client (≥ 1.5.0) remet à disposition tout
+  périphérique encore tenu par une ancienne connexion à chaque
+  (re)connexion au serveur — jamais un périphérique exclu par la
+  politique ci-dessus.
 - Formats côté client : 32bpp XRGB8888 (passthrough) et 16bpp RGB565
   (conversion serveur avec dithering ordonné ; `SREMFB_NO_DITHER=1` pour
   couper).

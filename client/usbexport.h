@@ -22,5 +22,11 @@
 int  usb_export_init(int mode);
 void usb_export_tick(void);   /* rescan (~2 s): bind new eligible devices */
 void usb_export_stop(void);   /* unbind ours, give the devices back */
+/* Before each (re)connection to the server: a stub still "used" by a
+ * previous usbip connection is necessarily orphaned (one server at a
+ * time; a server that rebooted without detaching leaves a dead TCP
+ * connection usbip-host never notices) — make it available again so
+ * usbipd announces it. Never touches a device the policy excludes. */
+void usb_export_reclaim(void);
 
 #endif /* SREMFB_USBEXPORT_H */

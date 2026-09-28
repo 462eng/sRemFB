@@ -125,6 +125,13 @@ helps.
   Disabled by default on a Pi 3 (`SREMFB_USB=1` or `--usb` to force).
   Requires the `usbip` package on both sides; `usbipd` listens on the
   SBC's port 3240 — same trust model as the rest (dedicated LAN).
+  usbip itself has no TCP keepalive, so a server that vanished without
+  detaching (reboot, power cut) would leave the SBC's devices "in use"
+  by a dead connection: the server package detaches every import when
+  the system shuts down, before the network goes (`sremfb-usb-detach`
+  unit), and the client (≥ 1.5.0) releases any device still held by an
+  old connection each time it (re)connects to the server — never a
+  device excluded by the policy above.
 - Client-side formats: 32bpp XRGB8888 (passthrough) and 16bpp RGB565
   (server-side conversion with ordered dithering; `SREMFB_NO_DITHER=1` to
   turn it off).

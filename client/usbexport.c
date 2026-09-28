@@ -349,6 +349,79 @@ static void unbind_device(const char *busid)
     write_sysfs(USB_DRIVER "/bind", busid);
 }
 
+/* ------------------------------------------------- orphaned stubs */
+
+/* usbip-host's per-device state (usbip_status): 1 available, 2 used
+ * (a remote vhci holds it), 3 error. */
+#define SDEV_ST_AVAILABLE 1
+#define SDEV_ST_USED      2
+#define SDEV_ST_ERROR     3
+
+static int stub_status(const char *busid)
+{
+    char path[320], buf[16];
+
+    snprintf(path, sizeof(path), USBIP_DRIVER "/%s/usbip_status", busid);
+    if (read_sysfs(path, buf, sizeof(buf)) < 0)
+        return -1;
+    return atoi(buf);
+}
+
+/* Excluded by the policy whatever the driver: hubs, built-in/configured
+ * deny list, active NIC, mounted disk. A stub failing this is left
+ * alone (someone bound it by hand). */
+static int policy_excluded(const char *busid)
+{
+    char path[192], buf[16];
+    unsigned vend, prod;
+
+    snprintf(path, sizeof(path), USB_DEVICES "/%s/bDeviceClass", busid);
+    if (read_sysfs(path, buf, sizeof(buf)) == 0 &&
+        strtoul(buf, NULL, 16) == 0x09)
+        return 1;
+    snprintf(path, sizeof(path), USB_DEVICES "/%s/idVendor", busid);
+    if (read_sysfs(path, buf, sizeof(buf)) < 0)
+        return 1;
+    vend = (unsigned)strtoul(buf, NULL, 16);
+    snprintf(path, sizeof(path), USB_DEVICES "/%s/idProduct", busid);
+    if (read_sysfs(path, buf, sizeof(buf)) < 0)
+        return 1;
+    prod = (unsigned)strtoul(buf, NULL, 16);
+    return builtin_denied(vend, prod) ||
+           id_match(U.deny, U.n_deny, vend, prod) ||
+           guards_nic(busid) || guards_mounted(busid);
+}
+
+/* Give one stub back to usbipd: "stub down" (-1 on usbip_sockfd) shuts
+ * the dead connection and resets the device to available; if the
+ * kernel refuses, full unbind + bind. Waits up to ~1 s. */
+static int stub_release(const char *busid)
+{
+    char path[320];
+    int st = -1;
+
+    snprintf(path, sizeof(path), USBIP_DRIVER "/%s/usbip_sockfd", busid);
+    if (write_sysfs(path, "-1") == 0) {
+        for (int i = 0; i < 20; i++) {
+            st = stub_status(busid);
+            if (st == SDEV_ST_AVAILABLE)
+                return 0;
+            usleep(50 * 1000);
+        }
+    }
+    /* fallback: usbip unbind + bind */
+    write_sysfs(USBIP_DRIVER "/unbind", busid);
+    if (write_sysfs(USBIP_DRIVER "/bind", busid) < 0)
+        return -1;
+    for (int i = 0; i < 20; i++) {
+        st = stub_status(busid);
+        if (st == SDEV_ST_AVAILABLE)
+            return 0;
+        usleep(50 * 1000);
+    }
+    return -1;
+}
+
 /* --------------------------------------------------------- usbipd */
 
 static int usbipd_listening(void)
@@ -497,6 +570,44 @@ void usb_export_tick(void)
 {
     if (U.active)
         scan_and_bind();
+}
+
+void usb_export_reclaim(void)
+{
+    DIR *dir;
+    struct dirent *de;
+    int n = 0;
+
+    if (!U.active || !(dir = opendir(USBIP_DRIVER)))
+        return;
+    while ((de = readdir(dir))) {
+        char busid[64];
+        int st;
+
+        if (!is_busid(de->d_name))
+            continue;
+        strncpy(busid, de->d_name, sizeof(busid) - 1);
+        busid[sizeof(busid) - 1] = '\0';
+        st = stub_status(busid);
+        if (st != SDEV_ST_USED && st != SDEV_ST_ERROR)
+            continue;
+        if (policy_excluded(busid)) {
+            ulog("busid %s held by a previous usbip connection but "
+                 "excluded by the policy — left alone", busid);
+            continue;
+        }
+        if (stub_release(busid) == 0) {
+            ulog("busid %s was still held by a previous (dead) usbip "
+                 "connection — released for the server", busid);
+            n++;
+        } else {
+            ulog("busid %s: cannot release the orphaned usbip stub "
+                 "(status %d)", busid, stub_status(busid));
+        }
+    }
+    closedir(dir);
+    if (n)
+        ulog("%d orphaned device(s) made available again", n);
 }
 
 void usb_export_stop(void)
