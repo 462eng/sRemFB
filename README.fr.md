@@ -6,7 +6,8 @@ Un « moniteur réseau » minimal : `sremfb-server` expose un **connecteur
 d'écran virtuel par client** (module noyau EVDI, le pilote DisplayLink)
 sur un PC GNOME/Wayland et transfère l'image sur le LAN vers
 `sremfb-client`, un daemon console qui écrit les pixels directement dans
-`/dev/fb0` d'un SBC (Raspberry Pi, Banana Pi…).
+`/dev/fb0` d'un SBC (Raspberry Pi, Banana Pi…) — ou les affiche en
+scanout DRM/KMS natif (`SREMFB_OUTPUT=drm`).
 
 Chaque connecteur se comporte **comme un port physique** : tant qu'aucun
 client n'est connecté, le port est « débranché » et invisible. Quand un
@@ -48,13 +49,14 @@ et quand GNOME blanke ses écrans (DPMS transmis).
 
 **Testeurs bienvenus !** Les cartes marquées « non testé » ci-dessus ne
 demandent qu'à l'être, et les autres SBC ont toutes leurs chances : le
-client n'exige qu'un framebuffer (`/dev/fb0`) et la libc — Orange Pi,
+client n'exige qu'un framebuffer (`/dev/fb0`) ou un périphérique DRM/KMS,
+et la libc — Orange Pi,
 Odroid, Rockchip, autres Allwinner… Ouvrez une
 [issue](https://github.com/462eng/sRemFB/issues) avec la carte, l'OS, la
 résolution et le ressenti (fps, latence) — même un simple « ça marche »
 aide.
 
-**En préparation** (ligne 1.4.x) :
+**En préparation :**
 
 - **Backend SPICE / Proxmox — l'infra virtuelle sur thin clients.** Le
   but : monter un parc de postes de travail **entièrement virtualisé**
@@ -65,9 +67,6 @@ aide.
   serveur capture l'écran de la VM (spice-glib) et le diffuse aux mêmes
   clients, sans EVDI. Prototype fonctionnel validé contre QEMU ; test
   Proxmox en cours.
-- **Sortie DRM/KMS native côté client** — scanout direct (RGB565 ou
-  XRGB8888) sans passer par fbdev, page-flip sans déchirure sur les
-  frames pleines. Validé sur Pi 500, en prod chez l'auteur.
 - **Multi-écrans par SBC** — piloter les deux sorties HDMI d'un Pi 4/5
   comme deux moniteurs (ou deux têtes de VM) indépendants.
 - **Audio** — fait pour `sremfb-view` (PCM brut sur UDP, voir plus
@@ -110,6 +109,17 @@ aide.
   lien s'apprend par la mesure. Les mêmes PING servent de battement de cœur : une
   coupure réseau débranche l'écran virtuel et passe la dalle en « no
   signal » en ~6 s (repli TCP ~20-25 s avec un ancien pair).
+- **Sortie DRM/KMS native sur le SBC** (depuis la 1.5.0, à activer avec
+  `SREMFB_OUTPUT=drm` ; `/dev/fb0` reste le défaut) : le client pilote
+  lui-même la dalle via libdrm — modeset legacy (vc4, Allwinner sun4i…),
+  format de scanout choisi par le client (RGB565 par défaut, moitié de
+  bande passante ; XRGB8888 avec `SREMFB_DRM_DEPTH=32` ou en repli
+  automatique), sans toucher à l'émulation fbdev ni à la ligne de
+  commande du noyau. Deux buffers et **page-flip** sélectif : les frames
+  pleines (H.264, instantanés complets) sont basculées sans déchirure,
+  les petits rectangles de dommage écrits en place. Validé sur Pi 500
+  (vc4) et A20 (sun4i) ; en production chez l'auteur. Repli en simple
+  buffer si le flip n'est pas disponible.
 - **Hotplug de la dalle répercuté** : si la dalle du SBC est débranchée,
   le client se déconnecte et l'écran virtuel disparaît du bureau —
   exactement comme un câble tiré sur un vrai moniteur. La rebrancher
@@ -156,7 +166,7 @@ sudo modprobe evdi          # première fois seulement (auto au boot ensuite)
 systemctl --user daemon-reload && systemctl --user enable --now sremfb-server
 ```
 
-SBC (client), seule dépendance `liblz4-dev` :
+SBC (client), dépendances `liblz4-dev` et `libdrm-dev` :
 
 ```sh
 make -C client
@@ -183,7 +193,12 @@ l'écran « se débranche ».
 | `SREMFB_PORT` (serveur & client) | 4629 | port TCP |
 | `SREMFB_ALLOW` (serveur) | — | plages IPv4 autorisées, CIDR séparés par virgules (vide = tout accepter) ; `/etc/sremfb-server.conf` |
 | `SREMFB_SERVER` (client) | — | hôte/IP du serveur (requis) |
-| `SREMFB_FBDEV` (client) | `/dev/fb0` | device framebuffer |
+| `SREMFB_OUTPUT` (client) | `fb` | `fb` (framebuffer) ou `drm` (scanout KMS natif : modeset legacy, RGB565 par défaut) |
+| `SREMFB_FBDEV` (client) | `/dev/fb0` | device framebuffer (sortie `fb`) |
+| `SREMFB_DRM_CARD` (client) | auto | `/dev/dri/cardN` (sortie `drm` ; auto = 1ᵉ carte avec connecteur branché) |
+| `SREMFB_DRM_CONNECTOR` (client) | 1ᵉ branché | ex. `HDMI-A-1` (sortie `drm`) |
+| `SREMFB_DRM_MODE` (client) | preferred | `1920x1080` pour forcer (sortie `drm`) |
+| `SREMFB_DRM_DEPTH` (client) | 16 | `32` pour scanout XRGB8888 (sortie `drm` ; repli automatique si RGB565 non supporté) |
 | `SREMFB_TTY` (client) | `/dev/tty1` | VT prise en main (avant-plan + mode graphique) ; en préférer une sans getty, ex. `/dev/tty7` |
 | `SREMFB_WRITE_MODE` (client) | `mmap` | `pwrite` si l'affichage traîne (deferred-io) |
 | `SREMFB_MAC` (client) | auto | forcer le MAC annoncé (= identité du moniteur) |

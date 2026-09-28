@@ -35,15 +35,16 @@ Tested with libevdi/evdi-dkms **1.14.8** (Debian trixie).
 
 ### Client (SBC)
 
-Only build dependency: `liblz4-dev`.
+Build dependencies: `liblz4-dev` and `libdrm-dev`.
 
 ```sh
-sudo apt install build-essential liblz4-dev
+sudo apt install build-essential liblz4-dev libdrm-dev
 ```
 
-The client is deliberately pure C: no GLib, no DRM, nothing but libc and
-lz4 — the optional hardware H.264 decoding is plain V4L2 ioctls against
-the kernel UAPI headers. It compiles as-is on Debian, Raspberry Pi OS
+The client is deliberately pure C: no GLib, nothing but libc, lz4 and
+libdrm (opt-in DRM/KMS output, `SREMFB_OUTPUT=drm`) — the optional
+hardware H.264 decoding is plain V4L2 ioctls against the kernel UAPI
+headers. It compiles as-is on Debian, Raspberry Pi OS
 and Armbian.
 
 ### Windowed viewer (Linux PC, optional)
@@ -142,10 +143,11 @@ targets.
 
 Details:
 
-- **Client statically linked to lz4.** The script downloads `liblz4-dev`
-  for each target architecture (`apt-get download`, cached in
-  `pkg/sysroot/`) and links `liblz4.a` in. The client package therefore
-  depends only on `libc6` — no lz4 version constraint on the target.
+- **Client statically linked to lz4, dynamically to libdrm.** The script
+  downloads `liblz4-dev`, `libdrm2` and `libdrm-dev` for each target
+  architecture (`apt-get download`, cached in `pkg/sysroot/`), links
+  `liblz4.a` in and `libdrm.so` dynamically. The client package depends
+  on `libc6` and `libdrm2` — no lz4 version constraint on the target.
 - **Cross-compiling** the client: needs the `gcc-aarch64-linux-gnu` and
   `gcc-arm-linux-gnueabihf` toolchains, plus the `arm64`/`armhf`
   architectures enabled in dpkg for `apt-get download`:
