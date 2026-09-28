@@ -234,6 +234,38 @@ indépendante).
 > chaud. Il prend effet au prochain redémarrage de GDM (`systemctl restart
 > gdm3`, ou reboot) — une simple reconnexion de session ne suffit pas.
 
+## Visionneuse fenêtrée
+
+`sremfb-view` est un client pour **PC Linux de bureau** : il branche un
+écran virtuel sur un `sremfb-server` distant exactement comme un SBC, et
+l'affiche dans une fenêtre (SDL3, Wayland natif) — pour utiliser une
+autre machine GNOME depuis son poste, par exemple un serveur GPU.
+
+```sh
+sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
+```
+
+- Conçue pour la **latence** : un thread réseau reçoit et décompresse
+  (LZ4) dès l'arrivée des octets et renvoie les PING ; le thread
+  d'affichage n'envoie au GPU que les rectangles modifiés et présente
+  toujours l'image la plus récente — aucune file de frames. VSync coupée
+  par défaut (`--vsync` pour l'activer). **Jamais de H.264** : la
+  capacité n'est pas annoncée, le flux reste en rectangles RAW/LZ4.
+- Géométrie `--size WxH` (défaut 1920x1080), XRGB8888 ou `--rgb565`
+  (moitié du débit, tramé par le serveur).
+- Identité : MAC **localement administrée** dérivée de
+  `/etc/machine-id` (stable, jamais celle d'une vraie carte ; `--mac`
+  pour forcer), modèle « sremfb-view » (`--model`). GNOME mémorise donc
+  la position de cet écran comme pour un SBC.
+- Fenêtre redimensionnable (ratio conservé, bandes noires), **F11** plein
+  écran, **Échap maintenue 1 s** ou fermeture de la fenêtre pour quitter.
+  Titre : serveur et fps.
+- Déconnexions comme le client SBC : battement de cœur de 6 s,
+  reconnexion automatique avec backoff.
+- `--stats` : toutes les 5 s sur stderr, fps reçus et présentés, Mo/s,
+  temps LZ4, temps upload+présentation, délai de file estimé depuis les
+  PING. `--dump N` : sauve N frames en PPM (validation sans écran).
+
 ## Notes
 
 - La position de chaque écran se règle **une seule fois** dans Réglages →

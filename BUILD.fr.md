@@ -43,12 +43,25 @@ d'autre que la libc et lz4 — le décodage H.264 matériel optionnel passe
 par de purs ioctls V4L2 contre les en-têtes UAPI du noyau. Il compile
 tel quel sur Debian, Raspberry Pi OS et Armbian.
 
+### Visionneuse fenêtrée (PC Linux, optionnelle)
+
+`view/sremfb-view` affiche l'écran virtuel d'un serveur distant dans une
+fenêtre (SDL3, Wayland natif) — voir [README.fr.md](README.fr.md),
+section « Visionneuse fenêtrée ». Hors de `make` par défaut, pour ne pas
+imposer SDL3 aux builds serveur et SBC.
+
+```sh
+sudo apt install build-essential liblz4-dev libsdl3-dev
+make view
+```
+
 ## Build local
 
 ```sh
 make                 # server/sremfb-server + client/sremfb-client
 make -C server       # serveur seul
 make -C client       # client seul
+make view            # view/sremfb-view (SDL3)
 make clean
 ```
 
@@ -101,7 +114,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sremfb-client
 ```
 
-`PREFIX` (défaut `/usr/local`) et `DESTDIR` sont respectés par les deux
+### Visionneuse fenêtrée (sur le PC de bureau)
+
+```sh
+sudo make install-view             # $(PREFIX)/bin/sremfb-view
+```
+
+`PREFIX` (défaut `/usr/local`) et `DESTDIR` sont respectés par toutes les
 cibles d'installation.
 
 ## Paquets Debian

@@ -43,12 +43,25 @@ lz4 — the optional hardware H.264 decoding is plain V4L2 ioctls against
 the kernel UAPI headers. It compiles as-is on Debian, Raspberry Pi OS
 and Armbian.
 
+### Windowed viewer (Linux PC, optional)
+
+`view/sremfb-view` shows a remote server's virtual screen in a window
+(SDL3, native Wayland) — see [README.md](README.md), "Windowed viewer".
+Not part of the default `make`, so SDL3 is never required for server and
+SBC builds.
+
+```sh
+sudo apt install build-essential liblz4-dev libsdl3-dev
+make view
+```
+
 ## Local build
 
 ```sh
 make                 # server/sremfb-server + client/sremfb-client
 make -C server       # server only
 make -C client       # client only
+make view            # view/sremfb-view (SDL3)
 make clean
 ```
 
@@ -99,7 +112,13 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now sremfb-client
 ```
 
-`PREFIX` (default `/usr/local`) and `DESTDIR` are honored by both install
+### Windowed viewer (on the desktop PC)
+
+```sh
+sudo make install-view             # $(PREFIX)/bin/sremfb-view
+```
+
+`PREFIX` (default `/usr/local`) and `DESTDIR` are honored by all install
 targets.
 
 ## Debian packages

@@ -8,9 +8,15 @@ server-build:
 client-build:
 	$(MAKE) -C client
 
+# Windowed viewer for Linux desktops (SDL3): not in `all`, so server and
+# SBC builds never need libsdl3-dev
+view:
+	$(MAKE) -C view
+
 clean:
 	$(MAKE) -C server clean
 	$(MAKE) -C client clean
+	$(MAKE) -C view clean
 	rm -f sremfb-test-*.ppm rfb-test-*.ppm
 
 # On the PC (run as root; the unit goes to the system-wide user-unit dir)
@@ -62,4 +68,9 @@ install-client: client-build
 		install -D -m 644 systemd/sremfb.conf.example $(DESTDIR)/etc/sremfb.conf
 	@echo "Edit /etc/sremfb.conf, then: systemctl daemon-reload && systemctl enable --now sremfb-client"
 
-.PHONY: all server-build client-build clean install-server install-client
+# On a desktop PC
+install-view: view
+	install -D -m 755 view/sremfb-view $(DESTDIR)$(PREFIX)/bin/sremfb-view
+
+.PHONY: all server-build client-build view clean install-server \
+	install-client install-view

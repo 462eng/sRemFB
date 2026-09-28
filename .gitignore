@@ -1,6 +1,8 @@
 *.o
 server/sremfb-server
 client/sremfb-client
+view/sremfb-view
+sremfb-view-*.ppm
 sremfb-test-*.ppm
 dist/
 pkg/sysroot/

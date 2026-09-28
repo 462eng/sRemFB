@@ -234,6 +234,37 @@ position).
 > hotplug. It takes effect on the next GDM restart (`systemctl restart
 > gdm3`, or reboot) — a plain re-login is not enough.
 
+## Windowed viewer
+
+`sremfb-view` is a client for **Linux desktops**: it plugs a virtual
+monitor into a remote `sremfb-server` exactly like an SBC does, and
+shows it in a window (SDL3, native Wayland) — to use another GNOME
+machine from your own desk, e.g. a GPU server.
+
+```sh
+sremfb-view [options] <server>       # sremfb-view --help for the details
+```
+
+- Built for **latency**: a network thread receives and decompresses
+  (LZ4) as soon as bytes arrive and echoes the PINGs; the display thread
+  uploads only the damaged rects and always presents the newest picture
+  — no frame queue anywhere. VSync is off by default (`--vsync` to turn
+  it on). **Never H.264**: the capability isn't advertised, the stream
+  stays on RAW/LZ4 rects.
+- Geometry `--size WxH` (default 1920x1080), XRGB8888 or `--rgb565`
+  (half the bandwidth, dithered by the server).
+- Identity: a **locally administered** MAC derived from
+  `/etc/machine-id` (stable, never a real NIC's; `--mac` to override),
+  model "sremfb-view" (`--model`). GNOME remembers this screen's
+  position just like an SBC's.
+- Resizable window (aspect ratio kept, black bars), **F11** fullscreen,
+  **hold Escape 1 s** or close the window to quit. Title: server and fps.
+- Disconnects handled like the SBC client: 6 s heartbeat, automatic
+  reconnection with backoff.
+- `--stats`: every 5 s on stderr, received and presented fps, MB/s, LZ4
+  time, upload+present time, queueing delay estimated from the PINGs.
+  `--dump N`: saves N frames as PPM (validation without a screen).
+
 ## Notes
 
 - Each screen's position is set **once** in Settings → Displays; GNOME
