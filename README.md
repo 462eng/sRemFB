@@ -351,6 +351,9 @@ physical screen turns off — and get everything back on disconnect:
 Without access to Settings (remotely), the same over D-Bus:
 `ApplyMonitorsConfig` with method 2 (persistent) and a single logical
 monitor holding the sRemFB screen's connector (see `GetCurrentState`).
+As from Settings, gnome-shell then asks "Keep these display settings?"
+on the sRemFB screen: click **Keep Changes** within 20 s, otherwise
+mutter reverts to the previous configuration and **saves nothing**.
 To undo: same procedure with "Join Displays" or "Mirror".
 
 If the viewer disappears abruptly (link lost), the server unplugs the
@@ -371,8 +374,9 @@ active.
   The server catches that case: when a client's screen lights up, if
   `monitors.xml` holds a configuration of the same monitors where only
   this client's connector differs (and no exact match), it re-applies it
-  under the new name (`ApplyMonitorsConfig`, persistent) — preferably
-  the one of the connector used last time
+  under the new name (`ApplyMonitorsConfig`, **temporary**: a persistent
+  apply would make gnome-shell ask "Keep these display settings?" and
+  revert after 20 s without an answer) — preferably the most recent one
   (`~/.local/state/sremfb/last-connectors`). `SREMFB_LAYOUT=0` to go
   without.
 - GNOME builds the Settings label as "vendor + diagonal". The udev hwdb

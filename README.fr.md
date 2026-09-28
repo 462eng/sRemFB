@@ -358,7 +358,10 @@ la déconnexion :
 Sans accès à Réglages (à distance), la même chose en D-Bus :
 `ApplyMonitorsConfig` avec la méthode 2 (persistante) et un seul
 moniteur logique contenant le connecteur de l'écran sRemFB (voir
-`GetCurrentState`). Revenir en arrière : même procédure avec
+`GetCurrentState`). Comme depuis Réglages, gnome-shell demande alors
+« Conserver cette configuration ? » sur l'écran sRemFB : cliquer
+**Conserver les modifications** dans les 20 s, sinon mutter revient à
+l'ancienne configuration et **n'enregistre rien**. Revenir en arrière : même procédure avec
 « Joindre les écrans » ou « Miroir ».
 
 Si la visionneuse disparaît brutalement (lien coupé), le serveur
@@ -381,8 +384,10 @@ que seul l'écran virtuel est actif.
   `monitors.xml` une configuration des mêmes moniteurs où seul le
   connecteur de ce client diffère (et pas de correspondance exacte), il
   la réapplique avec le nouveau nom (`ApplyMonitorsConfig`,
-  persistante) — de préférence celle du connecteur utilisé la fois
-  précédente (`~/.local/state/sremfb/last-connectors`).
+  **temporaire** : une application persistante ferait afficher à
+  gnome-shell « Conserver cette configuration ? » et revenir en arrière
+  au bout de 20 s sans réponse) — de préférence la plus récente
+  (`~/.local/state/sremfb/last-connectors`).
   `SREMFB_LAYOUT=0` pour s'en passer.
 - GNOME compose l'étiquette des Réglages comme « vendor + diagonale ».
   La hwdb udev (`61-sremfb-display-vendor.hwdb`) enregistre le vendor

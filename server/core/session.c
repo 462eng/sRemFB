@@ -111,6 +111,7 @@ void sremfb_client_lost(SremfbClient *c)
     g_clear_handle_id(&c->watch_id, g_source_remove);
     sremfb_input_stop(c);              /* release held keys first */
     sremfb_audio_stop(c);              /* default output back */
+    sremfb_layout_client_gone(c);
     sremfb_usb_peer_remove(c);
     sremfb_xmit_reset(c);
     if (c->fd >= 0) {

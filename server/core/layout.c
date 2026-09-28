@@ -16,13 +16,19 @@
  * the same monitors where only this client's connector name differs; if
  * mutter did not already apply an exact match, it re-applies that
  * configuration with the connector renamed, through
- * org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig (persistent: mutter
- * stores the renamed copy too). The other monitors must match exactly.
+ * org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig — method
+ * *temporary*: a persistent apply makes gnome-shell ask "Keep these
+ * display settings?" and revert after 20 s when nobody answers, and the
+ * copy would only be one more stale entry anyway. The other monitors
+ * must match exactly.
+ *
  * Several remembered configurations can qualify (one per connector name
- * this screen ever had), and mutter writes them in hash-table order, so
- * the server notes the connector each identity last streamed on
- * ($XDG_STATE_HOME/sremfb/last-connectors): that one's configuration is
- * the most recent, since mutter stored whatever was current under it.
+ * this screen ever had) and mutter writes them in hash-table order, so
+ * the server notes which one is the latest per identity
+ * ($XDG_STATE_HOME/sremfb/last-connectors): the one it re-applied, or,
+ * when the user saved a new configuration during the session (Settings
+ * stores it under the current connector), the current connector — that
+ * is checked when the client leaves.
  *
  * SREMFB_LAYOUT=0 turns it off.
  */
@@ -471,8 +477,8 @@ static void restore_for(SremfbClient *c, const State *st)
     root = xml_load(path);
     g_free(path);
     last = last_get(ours);
-    last_set(ours);                    /* whatever ends up current is
-                                          stored under this connector */
+    g_strlcpy(c->layout_serial, ours->serial, sizeof(c->layout_serial));
+    g_strlcpy(c->layout_product, ours->product, sizeof(c->layout_product));
     mons = xchild(root, "monitors");
     for (guint i = 0; mons && i < mons->kids->len; i++) {
         XNode *cfg = g_ptr_array_index(mons->kids, i);
@@ -482,6 +488,7 @@ static void restore_for(SremfbClient *c, const State *st)
         mt = config_match(cfg, st, ours);
         if (mt == 2) {                 /* mutter found it by itself */
             best = NULL;
+            last_set(ours);
             break;
         }
         if (mt == 1 && !best_is_last) {
@@ -496,13 +503,17 @@ static void restore_for(SremfbClient *c, const State *st)
     if (best) {
         GVariant *lms = build_logical(best, st, ours);
         if (lms) {
+            Mon src = *ours;
+            src.connector = (char *)config_connector(best, ours);
+            if (src.connector)
+                last_set(&src);        /* still the latest one */
             g_message("[%s] layout: mutter lost this screen's configuration "
                       "(new connector %s), re-applying it", c->macstr,
                       c->connector);
             g_dbus_connection_call(Y.bus, DC_NAME, DC_PATH, DC_NAME,
                                    "ApplyMonitorsConfig",
                                    g_variant_new("(uu@a(iiduba(ssa{sv}))"
-                                                 "@a{sv})", st->serial, 2u,
+                                                 "@a{sv})", st->serial, 1u,
                                                  lms,
                                                  g_variant_new_array(
                                                      G_VARIANT_TYPE("{sv}"),
@@ -592,6 +603,43 @@ void sremfb_layout_init(SremfbServer *srv)
                                        "MonitorsChanged", DC_PATH, NULL,
                                        G_DBUS_SIGNAL_FLAGS_NONE,
                                        on_monitors_changed, NULL, NULL);
+}
+
+/* Client leaving: if a configuration was saved for its current connector
+ * (the user changed the layout during the session), that one is the
+ * latest from now on. */
+void sremfb_layout_client_gone(SremfbClient *c)
+{
+    gchar *path;
+    XNode *root, *mons;
+    gboolean saved = FALSE;
+
+    if (!Y.bus || !c->layout_serial[0] || !c->connector[0])
+        return;
+    path = g_build_filename(g_get_user_config_dir(), "monitors.xml", NULL);
+    root = xml_load(path);
+    g_free(path);
+    mons = xchild(root, "monitors");
+    Mon cur = { .connector = c->connector, .serial = c->layout_serial,
+                .product = c->layout_product, .vendor = NULL };
+    for (guint i = 0; mons && i < mons->kids->len && !saved; i++) {
+        XNode *cfg = g_ptr_array_index(mons->kids, i);
+        GPtrArray *specs;
+        if (strcmp(cfg->name, "configuration") != 0)
+            continue;
+        specs = g_ptr_array_new();
+        config_specs(cfg, specs);
+        for (guint j = 0; j < specs->len && !saved; j++) {
+            const XNode *sp = g_ptr_array_index(specs, j);
+            saved = g_strcmp0(xtext(sp, "connector"), cur.connector) == 0 &&
+                    g_strcmp0(xtext(sp, "serial"), cur.serial) == 0 &&
+                    g_strcmp0(xtext(sp, "product"), cur.product) == 0;
+        }
+        g_ptr_array_free(specs, TRUE);
+    }
+    if (saved)
+        last_set(&cur);
+    xnode_free(root);
 }
 
 void sremfb_layout_client(SremfbClient *c)

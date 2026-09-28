@@ -106,6 +106,8 @@ struct SremfbClient {
                                   source; maps absolute pointer events */
     gboolean layout_pending;   /* layout.c: remembered configuration not
                                   checked yet for this connection */
+    char layout_serial[32];    /* layout.c: EDID identity as mutter sees */
+    char layout_product[32];   /* it, once known */
 
     /* upstream (PONG) reassembly */
     uint8_t recvbuf[1024];
@@ -246,6 +248,7 @@ void     sremfb_audio_shutdown(void);              /* restores the default */
  * client's connector name changed */
 void sremfb_layout_init(SremfbServer *srv);        /* unless SREMFB_LAYOUT=0 */
 void sremfb_layout_client(SremfbClient *c);        /* at STREAMING entry */
+void sremfb_layout_client_gone(SremfbClient *c);   /* before teardown */
 
 /* xmit.c — per-client non-blocking transmit queue */
 void sremfb_xmit_damage(SremfbClient *c, const struct sremfb_rect *rects,
