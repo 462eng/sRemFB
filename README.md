@@ -189,6 +189,7 @@ screen "unplugs".
 | `SREMFB_USB_ALLOW` (client) | — | `vendor[:product]` ids always teleported (network/disk guards still win) |
 | `SREMFB_USB_DENY` (client) | — | `vendor[:product]` ids never teleported |
 | `SREMFB_NO_USB` (server) | — | never attach clients' USB devices |
+| `SREMFB_INPUT` (server) | — | `1` = replay allowed clients' keyboard/mouse/gamepad on uinput devices (off by default) |
 
 The client runs as root by default (`/dev/fb0` access + console ioctls).
 The server runs as the session user: access to `/dev/dri/cardN` (the EVDI
@@ -257,8 +258,31 @@ sremfb-view [options] <server>       # sremfb-view --help for the details
   `/etc/machine-id` (stable, never a real NIC's; `--mac` to override),
   model "sremfb-view" (`--model`). GNOME remembers this screen's
   position just like an SBC's.
-- Resizable window (aspect ratio kept, black bars), **F11** fullscreen,
-  **hold Escape 1 s** or close the window to quit. Title: server and fps.
+- **Keyboard, mouse and gamepad** go to the remote desktop when its
+  server allows it (`SREMFB_INPUT=1`, off by default; see
+  [PROTOCOL.md](PROTOCOL.md#input)), replayed there on uinput devices —
+  keys by physical position (the server's layout applies), gamepad seen
+  as an Xbox 360 pad by Steam and SDL. Nothing stays held down: focus
+  loss, disconnect or a lost link release everything on the remote side.
+- Mouse **absolute** by default (desktop/KVM use: the remote cursor
+  follows yours). **Tap Right Ctrl** to **capture** it for games:
+  relative mouse (raw, pointer locked) and a keyboard grab, so Super,
+  Alt+Tab… go to the remote side too (GNOME asks once to allow the
+  shortcut inhibition). Tap Right Ctrl again to release; focus loss
+  releases too. Right Ctrl is never forwarded; **Right Ctrl+F**
+  fullscreen, **Right Ctrl+Q** quit. The title shows the mode.
+- Without input (old server, `SREMFB_INPUT` off, `--no-input`): view
+  only, **F11** fullscreen, **hold Escape 1 s** to quit. Closing the
+  window always quits. Resizable window (aspect ratio kept, black bars).
+- `--latency-test N` measures input → remote render → capture → network
+  → decoded here, on the viewer's clock alone, against
+  `sremfb-latency-probe` (package tool, python3-gi + GTK 4) running
+  fullscreen on the virtual screen: min/median/p95/max over N trials,
+  for a key (`--latency-input key`), the absolute pointer (`abs`) or the
+  relative mouse (`rel`). "rx" = pixel decoded, "shown" = after the
+  local `SDL_RenderPresent`; the local compositor, scanout and the
+  monitor's own lag are not counted.
+- No gamepad rumble yet (force feedback not forwarded).
 - Disconnects handled like the SBC client: 6 s heartbeat, automatic
   reconnection with backoff.
 - `--stats`: every 5 s on stderr, received and presented fps, MB/s, LZ4

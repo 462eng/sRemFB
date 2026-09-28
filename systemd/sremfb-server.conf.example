@@ -10,3 +10,9 @@ SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
 
 # Ne jamais attacher les périphériques USB des clients (usbip).
 # SREMFB_NO_USB=1
+
+# Entrées des clients (clavier, souris, manette) injectées par uinput sur
+# ce poste — DÉSACTIVÉ par défaut. 1 = autorisé pour les clients admis
+# par SREMFB_ALLOW qui le demandent (sremfb-view). Quiconque est admis
+# peut alors taper et cliquer sur cette session : LAN de confiance only.
+# SREMFB_INPUT=1

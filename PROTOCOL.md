@@ -4,9 +4,10 @@
 
 sRemFB's application protocol, shared verbatim by server and client in
 [`protocol.h`](protocol.h). Version described here: **v2**
-(`SREMFB_PROTO_VER = 2`), including its **feature bits** (delay feedback
-and adaptive H.264, negotiated through the hellos without a version
-bump — every old/new combination stays compatible).
+(`SREMFB_PROTO_VER = 2`), including its **feature bits** (delay feedback,
+adaptive H.264, keyboard/mouse/gamepad input, negotiated through the
+hellos without a version bump — every old/new combination stays
+compatible).
 
 ## Transport
 
@@ -55,6 +56,8 @@ server → client   :  sremfb_frame_hdr + payload   (repeated, on damage)
                      sremfb_frame_hdr BLANK / UNBLANK   (no payload)
                      sremfb_frame_hdr PING + u64       (if negotiated)
 client → server   :  sremfb_client_msg PONG (16 B, echoes each PING)
+client → server   :  sremfb_input_msg INPUT (16 B, input events, when
+                      negotiated)
 server → client   :  sremfb_frame_hdr H264 + access unit   (under
                      measured congestion, if negotiated; H264_EOS ends
                      the episode)
@@ -70,7 +73,7 @@ Sent exactly once, right after the connection.
 |---|---|---|
 | `magic` | `u32` | `SREMFB_MAGIC` |
 | `proto_ver` | `u16` | `SREMFB_PROTO_VER` (2) |
-| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = the client accepts LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = the client echoes PING as PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = the client decodes H.264 (4:2:0, Annex B) at its resolution · bit 3 `SREMFB_HELLO_FLAG_USB` = the client exports USB devices over usbip (see "USB teleport") |
+| `flags` | `u16` | bit 0 `SREMFB_HELLO_FLAG_LZ4` = the client accepts LZ4 · bit 1 `SREMFB_HELLO_FLAG_FEEDBACK` = the client echoes PING as PONG · bit 2 `SREMFB_HELLO_FLAG_H264` = the client decodes H.264 (4:2:0, Annex B) at its resolution · bit 3 `SREMFB_HELLO_FLAG_USB` = the client exports USB devices over usbip (see "USB teleport") · bit 4 `SREMFB_HELLO_FLAG_INPUT` = the client would like to send its input (see "Input") |
 | `xres`, `yres` | `u16` | visible framebuffer resolution |
 | `bpp` | `u8` | framebuffer bits per pixel: 16 or 32 |
 | `pixfmt` | `u8` | `enum sremfb_pixfmt` |
@@ -92,7 +95,7 @@ Sent once, after the compositor has set a mode on the connector.
 | `status` | `u16` | `enum sremfb_status`; nonzero ⇒ the client closes |
 | `width`, `height` | `u16` | negotiated stream size (normally `xres`,`yres`) |
 | `pixfmt` | `u8` | pixel format of the frames that follow |
-| `flags` | `u8` | bit 0 `SREMFB_SRV_FLAG_PING` = PINGs may appear · bit 1 `SREMFB_SRV_FLAG_H264` = the stream may switch to H.264. The server only sets a bit the client advertised; older servers always send 0 here |
+| `flags` | `u8` | bit 0 `SREMFB_SRV_FLAG_PING` = PINGs may appear · bit 1 `SREMFB_SRV_FLAG_H264` = the stream may switch to H.264 · bit 2 `SREMFB_SRV_FLAG_INPUT` = INPUT messages are accepted (devices created). The server only sets a bit the client advertised; older servers always send 0 here |
 | `reserved[2]` | `u8` | reserved |
 
 Status codes (`enum sremfb_status`):
@@ -131,9 +134,15 @@ Encodings (`enum sremfb_encoding`):
 
 ### `sremfb_client_msg` — 16 bytes, client → server
 
-The only upstream message beyond the hello. Sent only when the server
-hello advertised `SREMFB_SRV_FLAG_PING` (older servers read and discard
-upstream bytes, so a confused client does no harm).
+Every upstream message after the hello is **16 bytes** and starts with
+`magic` + `type`; the server ignores types it doesn't know (and, on
+corruption, skips byte-wise to the next magic, dropping the client past
+256 bytes of garbage). Two types:
+
+- `SREMFB_CMSG_PONG` (1), sent only when the server hello advertised
+  `SREMFB_SRV_FLAG_PING`;
+- `SREMFB_CMSG_INPUT` (2), sent only when the server hello advertised
+  `SREMFB_SRV_FLAG_INPUT` (struct `sremfb_input_msg`, see "Input").
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -149,6 +158,67 @@ delay of everything queued ahead — kernel send buffer, network queues
 and client processing. That delay is the congestion signal driving the
 adaptive encoder (see below); only the server's clock is involved, no
 synchronization needed.
+
+### `sremfb_input_msg` — 16 bytes, client → server
+
+One Linux evdev event (values from `linux/input-event-codes.h`), same
+size and header as `sremfb_client_msg`.
+
+| Field | Type | Purpose |
+|---|---|---|
+| `magic` | `u32` | `SREMFB_MAGIC` |
+| `type` | `u8` | 2 = `SREMFB_CMSG_INPUT` |
+| `dev` | `u8` | `enum sremfb_indev`: target device |
+| `reserved[2]` | `u8` | reserved (0) |
+| `ev_type` | `u16` | `EV_SYN`, `EV_KEY`, `EV_REL` or `EV_ABS` |
+| `ev_code` | `u16` | evdev code (`KEY_A`, `BTN_LEFT`, `REL_X`, `ABS_X`…) |
+| `ev_value` | `i32` | evdev value |
+
+Devices (`enum sremfb_indev`), each a separate uinput device on the
+server:
+
+| Value | Name | Events |
+|---|---|---|
+| 0 | `ALL` | only with `ev_type` 0: release every key and button held on every device (focus lost); the gamepad goes back to neutral |
+| 1 | `KEYBOARD` | `EV_KEY` `KEY_*` (physical positions; the server's layout gives the characters) |
+| 2 | `MOUSE` | relative: `REL_X`/`REL_Y`, `REL_WHEEL`/`REL_HWHEEL` (+ `_HI_RES`, 1/120 notch), `BTN_LEFT/RIGHT/MIDDLE/SIDE/EXTRA` |
+| 3 | `POINTER` | absolute: `ABS_X`/`ABS_Y` in **stream pixels** (0..width−1, 0..height−1); the server places them on the client's virtual screen; buttons and wheels as `MOUSE` |
+| 4 | `GAMEPAD` | Xbox 360 (xpad) layout: `BTN_A/B/X/Y`, `BTN_TL/TR`, `BTN_SELECT/START/MODE`, `BTN_THUMBL/R`; `ABS_X/Y/RX/RY` −32768..32767 (+Y down), triggers `ABS_Z/RZ` 0..255, d-pad `ABS_HAT0X/Y` −1..1 |
+
+## Input
+
+Negotiation, both ways:
+
+1. the client sets `SREMFB_HELLO_FLAG_INPUT` in its hello;
+2. the server creates the client's uinput devices **before** sending its
+   hello, and only sets `SREMFB_SRV_FLAG_INPUT` if they exist and the
+   administrator allowed it (`SREMFB_INPUT=1`, off by default, on top of
+   the CIDR allowlist);
+3. the client sends **no** INPUT message until that bit arrives, and the
+   server ignores INPUT from a client it did not set it for.
+
+Each device applies its events at the `EV_SYN`/`SYN_REPORT` the client
+sends explicitly, like a kernel driver (typically one action's events +
+a SYN in a single `write`). No autorepeat: the server's compositor
+repeats, as with a USB keyboard. The server filters anything undeclared
+(codes, ranges) as well as doubled presses and releases of keys that are
+not down.
+
+**No stuck keys**: when the client disconnects or is lost (including the
+6 s watchdog), the server releases everything still held, re-centers the
+gamepad, then destroys the devices; the client sends `ALL` when its
+window loses the focus.
+
+Absolute pointer: the server reads the compositor's monitor layout
+(`org.gnome.Mutter.DisplayConfig.GetCurrentState`, re-read on every
+`MonitorsChanged`), finds the client's virtual screen by its connector
+(the EVDI card's `DVI-I-N`), and turns stream pixels into 0..32767
+coordinates over the global extents — what libinput expects from an
+absolute pointer such as QEMU's USB tablet. Until the layout knows the
+connector, absolute events are dropped.
+
+Gamepad: "Microsoft X-Box 360 pad", USB `045e:028e`, so Steam and SDL
+apply their stock mapping. No force feedback (rumble) yet.
 
 ## Pixels
 
@@ -208,6 +278,12 @@ exactly how the v2 feature bits were added: an old client leaves bits
 1-2 clear (server never pings nor encodes), an old server sends a zero
 `flags` byte (client never writes upstream), and every combination keeps
 the plain v2 behavior.
+
+Same for input: an old server (≤ 1.4.1) ignores bit 4 of the client
+hello and never advertises `SREMFB_SRV_FLAG_INPUT`, so a new client stays
+view only; and even if it sent INPUT, those are 16-byte messages with a
+magic, which the old server ignores without losing the framing (unknown
+type). An old client never sets bit 4: the server creates nothing.
 
 ## USB teleport
 

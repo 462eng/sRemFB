@@ -189,6 +189,7 @@ l'écran « se débranche ».
 | `SREMFB_USB_ALLOW` (client) | — | ids `vendor[:product]` toujours téléportés (les gardes réseau/disque priment) |
 | `SREMFB_USB_DENY` (client) | — | ids `vendor[:product]` jamais téléportés |
 | `SREMFB_NO_USB` (serveur) | — | ne jamais attacher les périphériques USB des clients |
+| `SREMFB_INPUT` (serveur) | — | `1` = rejouer clavier/souris/manette des clients admis sur des périphériques uinput (désactivé par défaut) |
 
 Le client tourne en root par défaut (accès `/dev/fb0` + ioctl console).
 Le serveur tourne en user de session : l'accès à `/dev/dri/cardN`
@@ -257,9 +258,34 @@ sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
   `/etc/machine-id` (stable, jamais celle d'une vraie carte ; `--mac`
   pour forcer), modèle « sremfb-view » (`--model`). GNOME mémorise donc
   la position de cet écran comme pour un SBC.
-- Fenêtre redimensionnable (ratio conservé, bandes noires), **F11** plein
-  écran, **Échap maintenue 1 s** ou fermeture de la fenêtre pour quitter.
-  Titre : serveur et fps.
+- **Clavier, souris et manette** passent au bureau distant quand son
+  serveur l'autorise (`SREMFB_INPUT=1`, désactivé par défaut ; voir
+  [PROTOCOL.fr.md](PROTOCOL.fr.md#entrées)), rejoués là-bas sur des
+  périphériques uinput — touches par position physique (la disposition
+  du serveur s'applique), manette vue comme une Xbox 360 par Steam et
+  SDL. Rien ne reste enfoncé : perte de focus, déconnexion ou lien
+  perdu relâchent tout côté distant.
+- Souris **absolue** par défaut (usage bureau/KVM : le curseur distant
+  suit le vôtre). **Appui bref sur Ctrl droit** pour la **capturer** en
+  jeu : souris relative (brute, pointeur verrouillé) et clavier saisi,
+  donc Super, Alt+Tab… partent aussi côté distant (GNOME demande une
+  fois l'autorisation d'inhiber ses raccourcis). Nouvel appui sur Ctrl
+  droit pour libérer ; la perte de focus libère aussi. Ctrl droit n'est
+  jamais transmis ; **Ctrl droit+F** plein écran, **Ctrl droit+Q**
+  quitter. Le titre affiche le mode.
+- Sans entrées (ancien serveur, `SREMFB_INPUT` absent, `--no-input`) :
+  lecture seule, **F11** plein écran, **Échap maintenue 1 s** pour
+  quitter. Fermer la fenêtre quitte toujours. Fenêtre redimensionnable
+  (ratio conservé, bandes noires).
+- `--latency-test N` mesure entrée → rendu distant → capture → réseau →
+  décodé ici, sur la seule horloge de la visionneuse, face à
+  `sremfb-latency-probe` (outil du paquet, python3-gi + GTK 4) lancé en
+  plein écran sur l'écran virtuel : min/médiane/p95/max sur N essais,
+  pour une touche (`--latency-input key`), le pointeur absolu (`abs`)
+  ou la souris relative (`rel`). « rx » = pixel décodé, « shown » =
+  après le `SDL_RenderPresent` local ; le compositeur local, le scanout
+  et le retard propre de l'écran ne sont pas comptés.
+- Pas encore de vibrations de manette (retour de force non transmis).
 - Déconnexions comme le client SBC : battement de cœur de 6 s,
   reconnexion automatique avec backoff.
 - `--stats` : toutes les 5 s sur stderr, fps reçus et présentés, Mo/s,

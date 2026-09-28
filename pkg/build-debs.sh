@@ -99,6 +99,10 @@ install -m 644 "$TOP/systemd/61-sremfb-display-vendor.hwdb" \
     "$ROOT/usr/lib/udev/hwdb.d/"
 install -m 644 "$TOP/systemd/60-sremfb-evdi.rules" \
     "$ROOT/usr/lib/udev/rules.d/"
+install -m 644 "$TOP/systemd/60-sremfb-uinput.rules" \
+    "$ROOT/usr/lib/udev/rules.d/"
+install -m 755 "$TOP/tools/sremfb-latency-probe" \
+    "$ROOT/usr/bin/sremfb-latency-probe"
 install -m 644 "$TOP/systemd/modules-load-sremfb.conf" \
     "$ROOT/etc/modules-load.d/sremfb.conf"
 install -m 644 "$TOP/systemd/modprobe-sremfb.conf" \
@@ -113,6 +117,9 @@ cat > "$ROOT/DEBIAN/postinst" <<'EOF'
 systemd-hwdb update || true
 udevadm control --reload 2>/dev/null || true
 modprobe evdi || true
+# entrées des clients (SREMFB_INPUT=1) : uinput + ACL uaccess tout de suite
+modprobe uinput || true
+udevadm trigger --action=change --sysname-match=uinput 2>/dev/null || true
 # Le service oneshot pose les droits groupe video sur /sys/devices/evdi/*
 # de façon fiable au boot (la règle udev seule ne suffit pas : son chmod
 # court avant que les attributs existent). --now l'applique tout de suite.
@@ -144,6 +151,7 @@ EOF
 chmod 755 "$ROOT/DEBIAN/postrm"
 make_deb sremfb-server amd64 \
 "Depends: libglib2.0-0t64, liblz4-1, libevdi1, evdi-dkms, libx264-164, usbip
+Suggests: python3-gi, gir1.2-gtk-4.0
 Conflicts: rfb-server
 Replaces: rfb-server
 Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
@@ -152,7 +160,10 @@ Description: sRemFB, écran virtuel réseau — serveur (connecteur EVDI)
  LZ4, vers les sremfb-client du LAN (allowlist CIDR). Mesure la
  congestion par le délai et bascule en H.264 (x264) les clients qui
  savent le décoder quand le lien sature. Attache par usbip les
- périphériques USB que les clients exportent (téléport USB)."
+ périphériques USB que les clients exportent (téléport USB). Sur option
+ (SREMFB_INPUT=1), rejoue clavier, souris et manette des clients sur des
+ périphériques uinput (sremfb-latency-probe : sonde de mesure de latence,
+ python3-gi + GTK 4)."
 
 # ---- sremfb-client (arm64 + armhf) ----
 for arch in arm64 armhf; do

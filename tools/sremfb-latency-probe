@@ -1,0 +1,127 @@
+#!/usr/bin/python3
+"""sremfb-latency-probe — target for `sremfb-view --latency-test`.
+
+Runs on the sremfb-server's desktop: a fullscreen window on the client's
+virtual monitor that flips between two colors on every input event it
+receives (key press, button press, pointer motion). The viewer sends an
+event, then watches the probe pixel in the frames it receives: the delay
+covers input transport, the server's compositor and this window's
+rendering, capture, and the network back — all on the viewer's clock.
+
+    sremfb-latency-probe [--connector DVI-I-2] [--timeout S] [-v]
+
+Without --connector, picks the monitor whose model says "sremfb" (the
+viewer's default EDID model), else the only DVI-I-* connector (EVDI).
+Needs python3-gi and GTK 4; run it inside the graphical session
+(WAYLAND_DISPLAY set). Ctrl-C or --timeout ends it.
+"""
+import argparse
+import signal
+import sys
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+COLORS = ((1.0, 0.0, 0.0), (0.0, 0.0, 1.0))     # red / blue
+
+
+def pick_monitor(display, want):
+    mons = display.get_monitors()
+    found = [mons.get_item(i) for i in range(mons.get_n_items())]
+    desc = ", ".join("%s (%s)" % (m.get_connector(), m.get_model())
+                     for m in found)
+    if want:
+        for m in found:
+            if m.get_connector() == want:
+                return m
+        sys.exit("no monitor %s among: %s" % (want, desc))
+    for m in found:
+        if "sremfb" in (m.get_model() or "").lower():
+            return m
+    evdi = [m for m in found if (m.get_connector() or "").startswith("DVI-I")]
+    if len(evdi) == 1:
+        return evdi[0]
+    sys.exit("cannot tell which monitor is the client's, use --connector "
+             "(monitors: %s)" % desc)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--connector", help="monitor connector, e.g. DVI-I-2")
+    ap.add_argument("--timeout", type=float, default=0,
+                    help="quit after S seconds (default: never)")
+    ap.add_argument("-v", "--verbose", action="store_true",
+                    help="print every event")
+    args = ap.parse_args()
+
+    app = Gtk.Application(application_id="fr.462eng.SremfbLatencyProbe")
+    state = {"i": 0, "n": 0, "last": None, "area": None}
+
+    def flip(what):
+        state["i"] ^= 1
+        state["n"] += 1
+        state["area"].queue_draw()
+        if args.verbose:
+            print("%s -> %s" % (what, "blue" if state["i"] else "red"),
+                  flush=True)
+
+    def draw(_area, cr, _w, _h):
+        cr.set_source_rgb(*COLORS[state["i"]])
+        cr.paint()
+
+    def on_key(_ctl, keyval, _keycode, _mods):
+        flip("key %s" % Gdk.keyval_name(keyval))
+        return True
+
+    def on_click(_gesture, _n, _x, _y):
+        flip("button")
+
+    def on_motion(_ctl, x, y):
+        pos = (round(x), round(y))
+        if pos != state["last"]:
+            if state["last"] is not None:
+                flip("motion %d,%d" % pos)
+            state["last"] = pos
+
+    def activate(app):
+        win = Gtk.ApplicationWindow(application=app,
+                                    title="sremfb-latency-probe")
+        area = state["area"] = Gtk.DrawingArea()
+        area.set_draw_func(draw)
+        win.set_child(area)
+        key = Gtk.EventControllerKey()
+        key.connect("key-pressed", on_key)
+        win.add_controller(key)
+        click = Gtk.GestureClick()
+        click.set_button(0)
+        click.connect("pressed", on_click)
+        area.add_controller(click)
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", on_motion)
+        area.add_controller(motion)
+
+        mon = pick_monitor(win.get_display(), args.connector)
+        g = mon.get_geometry()
+        print("probe on %s (%s) %dx%d+%d+%d" % (mon.get_connector(),
+              mon.get_model(), g.width, g.height, g.x, g.y), flush=True)
+        win.fullscreen_on_monitor(mon)
+        win.present()
+        if args.timeout > 0:
+            GLib.timeout_add(int(args.timeout * 1000), app.quit)
+
+    def on_sigint():
+        app.quit()
+        return GLib.SOURCE_REMOVE
+
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, on_sigint)
+    GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, on_sigint)
+    app.connect("activate", activate)
+    app.run([sys.argv[0]])
+    print("probe: %d flips" % state["n"], flush=True)
+
+
+if __name__ == "__main__":
+    main()

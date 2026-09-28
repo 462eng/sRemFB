@@ -51,11 +51,34 @@ struct view_fb {
     size_t stride;              /* w * bytespp */
     uint8_t *pixels;            /* w * h * bytespp, or NULL */
 
+    int input;                  /* the server confirmed INPUT: events
+                                   may be sent on this connection */
+
     struct view_rect damage[VIEW_DAMAGE_MAX];
     int damage_n;
     int damage_all;             /* upload everything (overflow, new gen) */
     unsigned batches;           /* published batches, for the dump logic */
+
+    /* --latency-test probe: while armed, the network thread timestamps the
+     * first decoded rect that changes the pixel at (probe_x, probe_y) away
+     * from probe_base — the input->pixels delay on the local clock */
+    int probe_armed;
+    unsigned probe_x, probe_y;
+    uint32_t probe_base;
+    uint64_t probe_hit_ns;      /* CLOCK_MONOTONIC, 0 = not yet */
 };
+
+/* Pixel value at (x, y) in the wire format. Caller holds fb->lock and
+ * checked fb->pixels. */
+static inline uint32_t view_fb_pixel(const struct view_fb *fb, unsigned x,
+                                     unsigned y)
+{
+    const uint8_t *p = fb->pixels + (size_t)y * fb->stride +
+                       (size_t)x * fb->bytespp;
+    if (fb->bytespp == 2)
+        return (uint32_t)p[0] | (uint32_t)p[1] << 8;
+    return ((uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16);
+}
 
 /* Counters for --stats and the window title. Written by one thread
  * each, read by the main thread: relaxed atomics are plenty. */
@@ -81,6 +104,7 @@ struct view_opts {
     unsigned req_w, req_h;          /* --size */
     uint8_t pixfmt;                 /* requested wire format */
     int no_lz4;
+    int no_input;                   /* never offer INPUT (view only) */
     uint8_t mac[6];
     char model[13];                 /* not NUL-terminated when full */
 };
@@ -97,10 +121,13 @@ struct view_net *view_net_start(const struct view_opts *o,
                                 view_wake_fn wake);
 void view_net_stop(struct view_net *n);
 
-/* Upstream messages from any thread (PONG today, input events in the
- * next step). Returns -1 when there is no live connection. Serialized
- * with the network thread's own writes. */
+/* Upstream messages from any thread (PONG, INPUT). Returns -1 when there
+ * is no live connection. Serialized with the network thread's own
+ * writes. */
 int view_net_send(struct view_net *n, const void *msg, size_t len);
+
+/* SDL scancode -> evdev KEY_* code, 0 = no equivalent (keymap.c). */
+int view_scancode_to_evdev(int scancode);
 
 /* Logging, same shape as the SBC client. */
 void view_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));

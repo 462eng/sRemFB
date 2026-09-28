@@ -229,6 +229,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         if (c->feedback && c->h264_cap && !c->h264_failed &&
             getenv("SREMFB_NO_H264") == NULL)
             flags |= SREMFB_SRV_FLAG_H264;
+        flags |= sremfb_input_start(c);   /* devices before the hello */
         g_clear_handle_id(&EV(c)->mode_timeout_id, g_source_remove);
         sremfb_xmit_hello(c, flags);
         c->state = SREMFB_CLIENT_STREAMING;
@@ -594,6 +595,27 @@ static gboolean sremfb_evdi_acquire(SremfbClient *c)
     return acquire_pooled(c, TRUE);
 }
 
+/* The compositor's name for the card's single connector ("DVI-I-2"):
+ * DRM numbers connectors per type across all cards, so sysfs'
+ * card<N>-<name> is unique and is what mutter reports. */
+static void set_connector(SremfbClient *c)
+{
+    char prefix[16];
+    GDir *d = g_dir_open("/sys/class/drm", 0, NULL);
+    const char *n;
+
+    c->connector[0] = '\0';
+    if (!d)
+        return;
+    g_snprintf(prefix, sizeof(prefix), "card%d-", EV(c)->dev->card);
+    while ((n = g_dir_read_name(d)))
+        if (g_str_has_prefix(n, prefix)) {
+            g_strlcpy(c->connector, n + strlen(prefix), sizeof(c->connector));
+            break;
+        }
+    g_dir_close(d);
+}
+
 /* The device stays open and flocked: only the ownership is returned. */
 static void sremfb_evdi_release(SremfbClient *c)
 {
@@ -618,6 +640,7 @@ static int evdi_source_acquire(SremfbClient *c)
         g_clear_pointer(&c->src_ctx, g_free);
         return SREMFB_STATUS_NO_DEVICE;
     }
+    set_connector(c);
     sremfb_evdi_plug(c);
     return SREMFB_STATUS_OK;
 }

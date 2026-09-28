@@ -4,6 +4,8 @@
  * Speaks protocol v2 exactly like the SBC client (see PROTOCOL.md), minus
  * the H.264 capability, which is never advertised: this viewer is meant
  * for latency-critical use and stays on the damage-rect RAW/LZ4 path.
+ * It offers INPUT (unless --no-input); the main thread only sends input
+ * events once the server hello confirmed it (fb->input).
  *
  * Everything that can block — connect, reads, the reconnect backoff —
  * polls the socket together with an eventfd, so view_net_stop() returns
@@ -226,6 +228,8 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
     if (!n->o.no_lz4)
         ch.flags |= SREMFB_HELLO_FLAG_LZ4;
     ch.flags |= SREMFB_HELLO_FLAG_FEEDBACK;
+    if (!n->o.no_input)
+        ch.flags |= SREMFB_HELLO_FLAG_INPUT;
     /* never SREMFB_HELLO_FLAG_H264: no inter-frame codec in this viewer */
     ch.xres = (uint16_t)n->o.req_w;
     ch.yres = (uint16_t)n->o.req_h;
@@ -285,6 +289,11 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
              ch.mac[0], ch.mac[1], ch.mac[2], ch.mac[3], ch.mac[4], ch.mac[5],
              (sh.flags & SREMFB_SRV_FLAG_PING) ? "" :
              " — old server without PING, liveness via TCP keepalive");
+    if (!n->o.no_input)
+        view_log("input %s", (sh.flags & SREMFB_SRV_FLAG_INPUT) ?
+                 "accepted by the server" :
+                 "not accepted by the server (SREMFB_INPUT off or older "
+                 "server): view only");
     return 0;
 }
 
@@ -304,6 +313,8 @@ static void fb_set_stream(struct view_net *n, unsigned w, unsigned h,
     fb->bytespp = n->o.pixfmt == SREMFB_PIX_RGB565 ? 2 : 4;
     fb->stride = (size_t)w * fb->bytespp;
     fb->connected = pixels != NULL;
+    fb->input = pixels != NULL && (n->srv_flags & SREMFB_SRV_FLAG_INPUT);
+    fb->probe_armed = 0;
     fb->blanked = 0;
     fb->damage_n = 0;
     fb->damage_all = 1;
@@ -352,6 +363,13 @@ static void fb_put_rect(struct view_net *n, const struct sremfb_frame_hdr *hd,
             memcpy(dst + y * fb->stride, src + y * row, row);
     }
     damage_add(fb, hd->x, hd->y, hd->w, hd->h);
+    if (fb->probe_armed && fb->probe_x >= hd->x && fb->probe_y >= hd->y &&
+        fb->probe_x < (unsigned)hd->x + hd->w &&
+        fb->probe_y < (unsigned)hd->y + hd->h &&
+        view_fb_pixel(fb, fb->probe_x, fb->probe_y) != fb->probe_base) {
+        fb->probe_hit_ns = now_ns();
+        fb->probe_armed = 0;
+    }
     pthread_mutex_unlock(&fb->lock);
 }
 

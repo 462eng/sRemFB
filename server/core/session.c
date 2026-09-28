@@ -12,7 +12,8 @@
  * released, like a cable being pulled.
  *
  * Config: --port N / SREMFB_PORT (default 4629),
- *         --allow CIDRs / SREMFB_ALLOW (IPv4 allowlist, empty = everyone).
+ *         --allow CIDRs / SREMFB_ALLOW (IPv4 allowlist, empty = everyone),
+ *         SREMFB_INPUT=1 (input injection, off by default — input.c).
  */
 #include <errno.h>
 #include <glib-unix.h>
@@ -107,6 +108,7 @@ void sremfb_client_lost(SremfbClient *c)
 {
     g_clear_handle_id(&c->lost_id, g_source_remove);
     g_clear_handle_id(&c->watch_id, g_source_remove);
+    sremfb_input_stop(c);              /* release held keys first */
     sremfb_usb_peer_remove(c);
     sremfb_xmit_reset(c);
     if (c->fd >= 0) {
@@ -137,9 +139,11 @@ void sremfb_schedule_client_lost(SremfbClient *c)
         c->lost_id = g_idle_add(client_lost_idle, c);
 }
 
-/* Upstream traffic: PONG echoes from feedback-capable clients (parsed and
- * fed to the pressure controller), anything else skipped byte-wise until
- * a magic lines back up (the same resync guard as the frame stream). */
+/* Upstream traffic: fixed 16-byte messages — PONG echoes from
+ * feedback-capable clients (fed to the pressure controller), INPUT events
+ * once input was negotiated (replayed on uinput); a bad magic is skipped
+ * byte-wise until one lines back up (the same resync guard as the frame
+ * stream), unknown types are ignored. */
 static void client_parse_upstream(SremfbClient *c)
 {
     for (;;) {
@@ -162,9 +166,14 @@ static void client_parse_upstream(SremfbClient *c)
         memmove(c->recvbuf, c->recvbuf + sizeof(msg), c->recvlen);
         c->recv_garbage = 0;
 
-        if (msg.type == SREMFB_CMSG_PONG && c->feedback)
+        if (msg.type == SREMFB_CMSG_PONG && c->feedback) {
             sremfb_ctl_on_pong(c, msg.t_echo_us);
-        /* unknown types: ignore (forward compat) */
+        } else if (msg.type == SREMFB_CMSG_INPUT && c->input) {
+            struct sremfb_input_msg im;
+            memcpy(&im, &msg, sizeof(im));
+            sremfb_input_msg(c, &im);
+        }
+        /* unknown types, or INPUT not negotiated: ignore (forward compat) */
     }
 }
 
@@ -260,6 +269,7 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     c->feedback = (hello.flags & SREMFB_HELLO_FLAG_FEEDBACK) != 0;
     c->h264_cap = (hello.flags & SREMFB_HELLO_FLAG_H264) != 0;
     c->usb_cap = (hello.flags & SREMFB_HELLO_FLAG_USB) != 0;
+    c->input_cap = (hello.flags & SREMFB_HELLO_FLAG_INPUT) != 0;
     g_strlcpy(c->peer, peer, sizeof(c->peer));
     g_snprintf(c->macstr, sizeof(c->macstr),
                "%02x:%02x:%02x:%02x:%02x:%02x",
@@ -267,10 +277,11 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
                hello.mac[3], hello.mac[4], hello.mac[5]);
 
     g_message("[%s] client %s: fb %ux%u %ubpp pixfmt %u lz4=%c ping=%c "
-              "h264=%c usb=%c model \"%.13s\"",
+              "h264=%c usb=%c input=%c model \"%.13s\"",
               c->macstr, peer, hello.xres, hello.yres, hello.bpp,
               hello.pixfmt, c->lz4 ? 'y' : 'n', c->feedback ? 'y' : 'n',
               c->h264_cap ? 'y' : 'n', c->usb_cap ? 'y' : 'n',
+              c->input_cap ? 'y' : 'n',
               hello.model[0] ? hello.model : "(none)");
 
     int st = srv->source->acquire(c);
@@ -282,8 +293,11 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
     }
 
     g_ptr_array_add(srv->clients, c);
-    c->watch_id = g_unix_fd_add(cfd, G_IO_IN | G_IO_HUP | G_IO_ERR,
-                                on_client_io, c);
+    /* upstream first: when several sources are ready, input events and
+     * PONGs are dispatched before frame building */
+    c->watch_id = g_unix_fd_add_full(G_PRIORITY_HIGH, cfd,
+                                     G_IO_IN | G_IO_HUP | G_IO_ERR,
+                                     on_client_io, c, NULL);
     return G_SOURCE_CONTINUE;
 }
 

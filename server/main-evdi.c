@@ -26,7 +26,8 @@ int main(int argc, char **argv)
             allow = argv[++i];
         } else {
             g_printerr("usage: %s [--port N] [--allow CIDR,CIDR...]\n"
-                       "  (env: SREMFB_PORT, SREMFB_ALLOW)\n", argv[0]);
+                       "  (env: SREMFB_PORT, SREMFB_ALLOW, SREMFB_INPUT=1)\n",
+                       argv[0]);
             return 2;
         }
     }
@@ -35,6 +36,14 @@ int main(int argc, char **argv)
         return 2;
     }
     server.port = (uint16_t)port;
+
+    /* input injection is opt-in: only an explicit SREMFB_INPUT=1 */
+    env = getenv("SREMFB_INPUT");
+    if (env && g_strcmp0(env, "1") == 0)
+        sremfb_input_init(&server);
+    else
+        g_message("input injection disabled (set SREMFB_INPUT=1 in "
+                  "/etc/sremfb-server.conf to allow it)");
 
     if (allow && *allow && !net_allow_parse(&server, allow)) {
         g_printerr("invalid SREMFB_ALLOW value: %s\n", allow);

@@ -2,7 +2,7 @@
 # the EVDI frame source in evdi/. A second binary (sremfb-spice) reuses
 # the same core objects with a SPICE source — see spice/Makefile.
 
-PKGS = glib-2.0 liblz4 x264
+PKGS = glib-2.0 gio-2.0 liblz4 x264
 
 CFLAGS ?= -O2 -g
 CFLAGS += -Wall -Wextra -Wno-unused-parameter -I.. -Icore -Ievdi \
@@ -10,7 +10,7 @@ CFLAGS += -Wall -Wextra -Wno-unused-parameter -I.. -Icore -Ievdi \
 LDLIBS = $(shell pkg-config --libs $(PKGS)) -levdi -lm
 
 CORE_OBJS = core/net.o core/convert.o core/control.o core/encoder.o \
-            core/xmit.o core/session.o
+            core/xmit.o core/session.o core/input.o
 EVDI_OBJS = evdi/evdi.o evdi/edid.o main-evdi.o
 
 sremfb-server: $(CORE_OBJS) $(EVDI_OBJS)

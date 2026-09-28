@@ -31,6 +31,7 @@ typedef enum {
 } SremfbCtlState;
 
 struct SremfbEncoder;             /* encoder.c, keeps x264.h out of here */
+struct SremfbInput;               /* input.c, per-client uinput devices */
 
 /* One connected client = one TCP socket + one frame source (an EVDI
  * connector, a SPICE display, ...). The MAC address sent in the hello
@@ -88,9 +89,17 @@ struct SremfbClient {
     gboolean feedback;         /* client echoes PING as PONG */
     gboolean h264_cap;         /* client decodes H.264 */
     gboolean usb_cap;          /* client exports USB devices (usbip) */
+    gboolean input_cap;        /* client offers to send INPUT messages */
+
+    /* input injection (input.c): non-NULL once the uinput devices exist
+     * and the server hello confirmed SREMFB_SRV_FLAG_INPUT */
+    struct SremfbInput *input;
+    char connector[32];        /* compositor connector name of the client's
+                                  virtual screen ("DVI-I-2"), set by the
+                                  source; maps absolute pointer events */
 
     /* upstream (PONG) reassembly */
-    uint8_t recvbuf[64];
+    uint8_t recvbuf[1024];
     size_t recvlen;
     unsigned recv_garbage;     /* bytes skipped hunting for the magic */
 
@@ -150,6 +159,9 @@ struct SremfbServer {
     SremfbAllowNet *allow;     /* empty = allow everyone */
     unsigned n_allow;
 
+    gboolean input_enabled;    /* SREMFB_INPUT=1: clients may inject
+                                  keyboard/mouse/gamepad events */
+
     const struct sremfb_source_ops *source;  /* the active frame backend */
     void *src;                 /* backend-private server-wide state
                                   (SremfbEvdiState, ...) */
@@ -204,6 +216,14 @@ void        sremfb_ctl_on_deliver(SremfbClient *c, size_t wire_bytes);
 int         sremfb_ctl_initial_kbps(const SremfbClient *c);
 gboolean    sremfb_ctl_skip_encode(SremfbClient *c);
 const char *sremfb_ctl_state_name(const SremfbClient *c);
+
+/* input.c — client input events replayed on uinput devices */
+void     sremfb_input_init(SremfbServer *srv);     /* SREMFB_INPUT=1 */
+uint8_t  sremfb_input_start(SremfbClient *c);      /* at STREAMING entry:
+                                                      SREMFB_SRV_FLAG_INPUT
+                                                      when the devices are up */
+void     sremfb_input_stop(SremfbClient *c);       /* releases, destroys */
+void     sremfb_input_msg(SremfbClient *c, const struct sremfb_input_msg *m);
 
 /* xmit.c — per-client non-blocking transmit queue */
 void sremfb_xmit_damage(SremfbClient *c, const struct sremfb_rect *rects,

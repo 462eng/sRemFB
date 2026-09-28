@@ -21,6 +21,10 @@
  *   - H264: the server may switch the stream to H.264 video (one Annex B
  *     access unit per message) when the measured delay says the raw path
  *     can't keep up, and back when the pressure subsides.
+ *   - INPUT: the client forwards keyboard/mouse/gamepad events as INPUT
+ *     client messages (evdev type/code/value triplets), which the server
+ *     replays on per-client uinput devices. Off unless the server's admin
+ *     enabled it (SREMFB_INPUT=1) and confirmed in the server hello.
  */
 #ifndef SREMFB_PROTOCOL_H
 #define SREMFB_PROTOCOL_H
@@ -71,11 +75,17 @@ enum sremfb_encoding {
                                                  them while streaming and
                                                  must detach when the client
                                                  leaves */
+#define SREMFB_HELLO_FLAG_INPUT    (1u << 4)  /* client would like to send
+                                                 INPUT messages (only does
+                                                 so once the server hello
+                                                 carries SREMFB_SRV_FLAG_INPUT) */
 
 /* server hello flags (the server only sets a bit when the client
  * advertised the matching capability) */
 #define SREMFB_SRV_FLAG_PING (1u << 0)    /* PING messages may appear */
 #define SREMFB_SRV_FLAG_H264 (1u << 1)    /* the stream may switch to H.264 */
+#define SREMFB_SRV_FLAG_INPUT (1u << 2)   /* INPUT messages are accepted: the
+                                             server's input devices exist */
 
 /* Server hello status codes. */
 enum sremfb_status {
@@ -126,11 +136,32 @@ struct sremfb_frame_hdr {
     uint32_t payload_len;      /* RAW: w*h*bytespp; BLANK/UNBLANK: 0 */
 } __attribute__((packed));
 
-/* client -> server, only when the server advertised SREMFB_SRV_FLAG_PING.
- * Sent at the client's position in its receive stream, so the server-side
- * (now - t_echo_us) covers every byte that was queued ahead of the PING. */
+/* client -> server, fixed 16-byte messages. PONG only when the server
+ * advertised SREMFB_SRV_FLAG_PING: sent at the client's position in its
+ * receive stream, so the server-side (now - t_echo_us) covers every byte
+ * that was queued ahead of the PING. INPUT only when the server advertised
+ * SREMFB_SRV_FLAG_INPUT (struct sremfb_input_msg, same size). */
 enum sremfb_cmsg_type {
-    SREMFB_CMSG_PONG = 1,
+    SREMFB_CMSG_PONG  = 1,
+    SREMFB_CMSG_INPUT = 2,
+};
+
+/* Target device of an INPUT message. Each one is a separate uinput device
+ * on the server, so the desktop classifies them like real hardware. */
+enum sremfb_indev {
+    SREMFB_INDEV_ALL      = 0,   /* only with ev_type 0: release every key
+                                    and button held on every device (focus
+                                    lost); a gamepad also re-centers */
+    SREMFB_INDEV_KEYBOARD = 1,   /* EV_KEY KEY_* */
+    SREMFB_INDEV_MOUSE    = 2,   /* relative: EV_REL X/Y/wheels, BTN_LEFT.. */
+    SREMFB_INDEV_POINTER  = 3,   /* absolute: EV_ABS ABS_X/ABS_Y in *stream
+                                    pixels* (0..width-1, 0..height-1), the
+                                    server maps them onto its desktop;
+                                    buttons and wheels as MOUSE */
+    SREMFB_INDEV_GAMEPAD  = 4,   /* Xbox 360 layout: BTN_A/B/X/Y, TL/TR,
+                                    SELECT/START/MODE, THUMBL/R; ABS_X/Y/
+                                    RX/RY -32768..32767, ABS_Z/RZ triggers
+                                    0..255, ABS_HAT0X/Y -1..1 */
 };
 
 struct sremfb_client_msg {
@@ -140,9 +171,23 @@ struct sremfb_client_msg {
     uint64_t t_echo_us;        /* PONG: the PING payload, verbatim */
 } __attribute__((packed));
 
+/* client -> server, INPUT: one Linux evdev event (linux/input-event-codes.h
+ * values). Events of one device take effect at its EV_SYN/SYN_REPORT,
+ * which the client sends explicitly, exactly like a kernel driver. */
+struct sremfb_input_msg {
+    uint32_t magic;            /* SREMFB_MAGIC */
+    uint8_t  type;             /* SREMFB_CMSG_INPUT */
+    uint8_t  dev;              /* enum sremfb_indev */
+    uint8_t  reserved[2];
+    uint16_t ev_type;          /* EV_SYN, EV_KEY, EV_REL, EV_ABS */
+    uint16_t ev_code;
+    int32_t  ev_value;
+} __attribute__((packed));
+
 _Static_assert(sizeof(struct sremfb_client_hello) == 48, "client hello size");
 _Static_assert(sizeof(struct sremfb_server_hello) == 16, "server hello size");
 _Static_assert(sizeof(struct sremfb_frame_hdr)   == 20, "frame header size");
 _Static_assert(sizeof(struct sremfb_client_msg)  == 16, "client msg size");
+_Static_assert(sizeof(struct sremfb_input_msg)   == 16, "input msg size");
 
 #endif /* SREMFB_PROTOCOL_H */

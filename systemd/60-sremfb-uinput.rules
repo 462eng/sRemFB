@@ -1,0 +1,6 @@
+# sRemFB : accès à /dev/uinput pour l'utilisateur de la session active
+# (uaccess, ACL posée par logind), comme la règle de Steam
+# (60-steam-input.rules). Le serveur y crée les périphériques d'entrée
+# (clavier, souris, pointeur absolu, manette) des clients — seulement si
+# SREMFB_INPUT=1 dans /etc/sremfb-server.conf.
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"

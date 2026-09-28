@@ -32,6 +32,10 @@ install-server: server-build
 		$(DESTDIR)/etc/udev/hwdb.d/61-sremfb-display-vendor.hwdb
 	install -D -m 644 systemd/60-sremfb-evdi.rules \
 		$(DESTDIR)/etc/udev/rules.d/60-sremfb-evdi.rules
+	install -D -m 644 systemd/60-sremfb-uinput.rules \
+		$(DESTDIR)/etc/udev/rules.d/60-sremfb-uinput.rules
+	install -D -m 755 tools/sremfb-latency-probe \
+		$(DESTDIR)$(PREFIX)/bin/sremfb-latency-probe
 	install -D -m 644 systemd/sremfb-evdi-perms.service \
 		$(DESTDIR)/etc/systemd/system/sremfb-evdi-perms.service
 	install -D -m 644 systemd/gdm-sremfb-evdi-purge.conf \
