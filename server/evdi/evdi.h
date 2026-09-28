@@ -41,6 +41,19 @@ typedef struct {
     guint kick_id;             /* deferred next update request (g_idle) */
     guint mode_timeout_id;     /* answers SERVER_FAIL if the compositor
                                   never enables the connector */
+
+    /* Cursor, composed here rather than by the kernel (cursor events on,
+     * see evdi.c): the plane's image and position, and the grabbuf
+     * pixels it currently covers so it can be lifted off again. */
+    gboolean cur_on;           /* plane enabled with a usable image */
+    int cur_x, cur_y;          /* plane top-left, may be negative */
+    int cur_w, cur_h;
+    int cur_stride;            /* in pixels */
+    uint32_t *cur_pix;         /* ARGB8888, premultiplied (libevdi malloc) */
+    gboolean cur_drawn;        /* blended into grabbuf at cur_rect */
+    struct sremfb_rect cur_rect;
+    uint32_t *cur_under;       /* grabbuf pixels under cur_rect */
+    size_t cur_under_size;     /* in pixels */
 } SremfbEvdiClient;
 
 /* The EVDI frame source (acquire = claim a device + plug an EDID). */

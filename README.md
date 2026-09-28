@@ -80,8 +80,9 @@ helps.
   `/sys/class/drm/*/edid`). The server builds an EDID of that exact size
   (vendor `RFB`, product = the remote panel's model, serial = the MAC)
   and "plugs" it into a free EVDI device. The compositor drives it like
-  any monitor; the server pulls the pixels through `libevdi` (the cursor
-  is blended in by the kernel).
+  any monitor; the server pulls the pixels through `libevdi` and blends
+  the cursor in itself, from evdi's cursor events (every show, hide,
+  move and shape change repaints just the old and new cursor areas).
 - **Several clients at once** on a single port: one EVDI device per
   client (see "Multiple screens"). A reconnect from the same MAC replaces
   the stale connection (SBC rebooted).

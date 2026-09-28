@@ -13,8 +13,16 @@
  * connect an EDID at the client's resolution -> compositor sets a mode
  * (mode_changed) -> register a grab buffer -> request_update /
  * grab_pixels loop driven by damage. The kernel merges damage into at
- * most 16 rects and blends the cursor into the grabbed pixels (cursor
- * events stay disabled). Static screen = no events = zero traffic.
+ * most 16 rects. Static screen = no events = zero traffic.
+ *
+ * The cursor is composed here, from evdi's cursor events: left to the
+ * kernel (cursor events off), it is blended into every grab, but a
+ * cursor plane being *disabled* — mutter does that the moment the
+ * pointer leaves the output — marks nothing dirty (evdi_modeset.c,
+ * evdi_cursor_atomic_update: dirty rects only `if (fb != NULL)`, evdi
+ * 1.14/1.15). No update, so the client kept the last cursor image
+ * forever. With the events we know every show, hide, shape change and
+ * move, and repaint exactly the old and new cursor rects.
  *
  * All evdi ioctls are unprivileged; access to /dev/dri/cardN comes from
  * the logind seat ACL, so the server runs as the session user.
@@ -39,6 +47,7 @@
 /* DRM constants, redeclared to avoid dragging libdrm headers in */
 #define DPMS_MODE_ON    0
 #define FOURCC_XR24     0x34325258u        /* DRM_FORMAT_XRGB8888 */
+#define FOURCC_AR24     0x34325241u        /* DRM_FORMAT_ARGB8888 */
 #define DRM_IOCTL_DROP_MASTER_ _IO('d', 0x1f)  /* DRM_IOCTL_DROP_MASTER */
 
 /* backend-private state, hung off the generic core structs */
@@ -93,6 +102,140 @@ static void send_ctrl(SremfbClient *c, uint8_t encoding)
     sremfb_xmit_ctrl(c, &hdr, sizeof(hdr));
 }
 
+/* ------------------------------------------------------------ cursor */
+
+/*
+ * grabbuf holds the desktop *with* the cursor blended in, as the client
+ * shows it; cur_under keeps what the cursor covers. Around every grab the
+ * cursor is lifted (the kernel only rewrites the damaged rects, the rest
+ * of grabbuf must be the bare desktop for the next blend) and put back on
+ * the fresh pixels. A cursor event lifts it, moves/reshapes/hides it,
+ * puts it back and reports the old and new rects as damage — no grab,
+ * no update request.
+ */
+
+/* The cursor's rect clipped to the screen; FALSE when nothing shows. */
+static gboolean cursor_rect(SremfbClient *c, struct sremfb_rect *r)
+{
+    SremfbEvdiClient *e = EV(c);
+
+    if (!e->cur_on || !c->grabbuf || !e->mode_valid)
+        return FALSE;
+    r->x1 = MAX(e->cur_x, 0);
+    r->y1 = MAX(e->cur_y, 0);
+    r->x2 = MIN(e->cur_x + e->cur_w, c->geom.width);
+    r->y2 = MIN(e->cur_y + e->cur_h, c->geom.height);
+    return r->x2 > r->x1 && r->y2 > r->y1;
+}
+
+/* Puts the covered pixels back. Returns TRUE (and the rect) when the
+ * cursor was on screen. */
+static gboolean cursor_lift(SremfbClient *c, struct sremfb_rect *out)
+{
+    SremfbEvdiClient *e = EV(c);
+    const struct sremfb_rect *r = &e->cur_rect;
+    size_t w = (size_t)(r->x2 - r->x1);
+
+    if (!e->cur_drawn)
+        return FALSE;
+    e->cur_drawn = FALSE;
+    if (!c->grabbuf)
+        return FALSE;
+    for (int y = r->y1; y < r->y2; y++)
+        memcpy(c->grabbuf + ((size_t)y * c->geom.width + r->x1) * 4,
+               e->cur_under + (size_t)(y - r->y1) * w, w * 4);
+    if (out)
+        *out = *r;
+    return TRUE;
+}
+
+/* s + d*(255-a)/255, rounded, on one 8-bit channel: premultiplied
+ * source over an opaque destination (DRM cursor planes default to
+ * premultiplied alpha; the kernel's own blend took it as straight alpha,
+ * which darkened the antialiased edges a little). */
+static inline uint32_t over8(uint32_t s, uint32_t d, uint32_t ia)
+{
+    uint32_t t = d * ia + 128;
+
+    t = s + ((t + (t >> 8)) >> 8);
+    return t > 255 ? 255 : t;
+}
+
+/* Blends the cursor at its current place, saving what it covers.
+ * Returns TRUE (and the rect) when something was drawn. */
+static gboolean cursor_draw(SremfbClient *c, struct sremfb_rect *out)
+{
+    SremfbEvdiClient *e = EV(c);
+    struct sremfb_rect r;
+
+    if (e->cur_drawn || !cursor_rect(c, &r))
+        return FALSE;
+    size_t w = (size_t)(r.x2 - r.x1), need = w * (size_t)(r.y2 - r.y1);
+    if (need > e->cur_under_size) {
+        g_free(e->cur_under);
+        e->cur_under = g_new(uint32_t, need);
+        e->cur_under_size = need;
+    }
+    for (int y = r.y1; y < r.y2; y++) {
+        uint8_t *row = c->grabbuf + ((size_t)y * c->geom.width + r.x1) * 4;
+        const uint32_t *src = e->cur_pix +
+            (size_t)(y - e->cur_y) * e->cur_stride + (r.x1 - e->cur_x);
+        uint32_t *dst = (uint32_t *)row;
+
+        memcpy(e->cur_under + (size_t)(y - r.y1) * w, row, w * 4);
+        for (size_t x = 0; x < w; x++) {
+            uint32_t s = src[x], a = s >> 24;
+            if (a == 0)
+                continue;
+            if (a == 255) {
+                dst[x] = s & 0x00ffffffu;
+                continue;
+            }
+            uint32_t d = dst[x], ia = 255 - a;
+            dst[x] = over8(s & 0xff, d & 0xff, ia) |
+                     over8((s >> 8) & 0xff, (d >> 8) & 0xff, ia) << 8 |
+                     over8((s >> 16) & 0xff, (d >> 16) & 0xff, ia) << 16;
+        }
+    }
+    e->cur_rect = r;
+    e->cur_drawn = TRUE;
+    if (out)
+        *out = r;
+    return TRUE;
+}
+
+/* Forgets the cursor image and what it covered (unplug). */
+static void cursor_reset(SremfbClient *c)
+{
+    SremfbEvdiClient *e = EV(c);
+
+    free(e->cur_pix);                  /* malloc'ed by libevdi */
+    e->cur_pix = NULL;
+    e->cur_on = FALSE;
+    e->cur_drawn = FALSE;
+    g_clear_pointer(&e->cur_under, g_free);
+    e->cur_under_size = 0;
+}
+
+/* After a cursor change (lifted first by the caller: had/old), puts it
+ * back and reports the old and new places as damage. */
+static void cursor_repaint(SremfbClient *c, const struct sremfb_rect *old,
+                           gboolean had)
+{
+    struct sremfb_rect rects[2];
+    int n = 0;
+    unsigned bytespp = (c->hello.pixfmt == SREMFB_PIX_RGB565) ? 2 : 4;
+
+    if (had)
+        rects[n++] = *old;
+    if (cursor_draw(c, &rects[n]))
+        n++;
+    if (n == 0 || !EV(c)->grab_registered || c->fd < 0 ||
+        c->state != SREMFB_CLIENT_STREAMING || c->lost_id)
+        return;
+    sremfb_xmit_damage(c, rects, n, bytespp);
+}
+
 /* Grabs the pending damage (consuming it even if the client just left)
  * and hands it to the transmit queue — nothing is sent from here, the
  * frames are built when each client's socket can take them (xmit.c). */
@@ -104,7 +247,13 @@ static void grab_and_send(SremfbClient *c)
 
     if (!EV(c)->grab_registered)
         return;
+    /* the kernel rewrites the damaged rects with the bare desktop: the
+     * rest of grabbuf has to be bare too, then the cursor goes back on
+     * top of the fresh pixels (inside the damaged rects, so no extra
+     * damage for it) */
+    cursor_lift(c, NULL);
     evdi_grab_pixels(EV(c)->dev->handle, rects, &num);
+    cursor_draw(c, NULL);
     if (num <= 0 || c->fd < 0 || c->state != SREMFB_CLIENT_STREAMING)
         return;
 
@@ -160,6 +309,53 @@ static void on_update_ready(int buffer, void *data)
         EV(c)->kick_id = g_idle_add(kick_idle, c);
 }
 
+static void on_cursor_set(struct evdi_cursor_set cs, void *data)
+{
+    SremfbClient *c = ((SremfbEvdiDevice *)data)->owner;
+    struct sremfb_rect old;
+    gboolean had;
+
+    if (!c) {
+        free(cs.buffer);
+        return;
+    }
+    SremfbEvdiClient *e = EV(c);
+    had = cursor_lift(c, &old);
+    free(e->cur_pix);
+    e->cur_pix = NULL;
+    e->cur_on = FALSE;
+    if (cs.enabled && cs.buffer && cs.width > 0 && cs.height > 0 &&
+        cs.width <= 512 && cs.height <= 512 &&
+        cs.stride >= cs.width * 4 && cs.stride % 4 == 0 &&
+        cs.buffer_length >= (uint64_t)cs.stride * cs.height) {
+        if (cs.pixel_format != FOURCC_AR24)
+            g_warning("[%s] cursor format 0x%08x, assuming ARGB8888",
+                      c->macstr, cs.pixel_format);
+        e->cur_pix = cs.buffer;        /* ours now (libevdi hands it over) */
+        e->cur_w = (int)cs.width;
+        e->cur_h = (int)cs.height;
+        e->cur_stride = (int)(cs.stride / 4);
+        e->cur_on = TRUE;
+    } else {
+        free(cs.buffer);
+    }
+    cursor_repaint(c, &old, had);
+}
+
+static void on_cursor_move(struct evdi_cursor_move cm, void *data)
+{
+    SremfbClient *c = ((SremfbEvdiDevice *)data)->owner;
+    struct sremfb_rect old;
+    gboolean had;
+
+    if (!c)
+        return;
+    had = cursor_lift(c, &old);
+    EV(c)->cur_x = cm.x;
+    EV(c)->cur_y = cm.y;
+    cursor_repaint(c, &old, had);
+}
+
 static void on_mode_changed(struct evdi_mode mode, void *data)
 {
     SremfbClient *c = ((SremfbEvdiDevice *)data)->owner;
@@ -201,6 +397,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         evdi_unregister_buffer(EV(c)->dev->handle, GRAB_BUFFER_ID);
         EV(c)->grab_registered = FALSE;
     }
+    EV(c)->cur_drawn = FALSE;          /* its pixels go with grabbuf */
     g_free(c->grabbuf);
     c->grabbuf = g_malloc((size_t)mode.width * mode.height * 4);
     g_free(c->shadowbuf);
@@ -284,6 +481,8 @@ static gboolean on_evdi_ready(gint fd, GIOCondition cond, gpointer data)
         .mode_changed_handler = on_mode_changed,
         .update_ready_handler = on_update_ready,
         .crtc_state_handler = on_crtc_state,
+        .cursor_set_handler = on_cursor_set,
+        .cursor_move_handler = on_cursor_move,
         .user_data = dev,
     };
 
@@ -608,6 +807,8 @@ static void sremfb_evdi_plug(SremfbClient *c)
     evdi_connect2(EV(c)->dev->handle, EV(c)->edid, sizeof(EV(c)->edid),
                   (uint32_t)c->hello.xres * c->hello.yres,
                   (uint32_t)c->hello.xres * c->hello.yres * 120u);
+    /* after the connect: the kernel turns them off on every disconnect */
+    evdi_enable_cursor_events(EV(c)->dev->handle, true);
     EV(c)->plugged = TRUE;
     c->state = SREMFB_CLIENT_MODE_WAIT;
     EV(c)->mode_timeout_id = g_timeout_add_seconds(10, on_mode_timeout, c);
@@ -628,6 +829,7 @@ static void sremfb_evdi_unplug(SremfbClient *c)
         evdi_unregister_buffer(EV(c)->dev->handle, GRAB_BUFFER_ID);
         EV(c)->grab_registered = FALSE;
     }
+    cursor_reset(c);
     g_clear_pointer(&c->grabbuf, g_free);
     g_clear_pointer(&c->shadowbuf, g_free);
     g_clear_pointer(&c->rectbuf, g_free);

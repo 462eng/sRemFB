@@ -82,8 +82,10 @@ aide.
   serveur construit un EDID à cette taille exacte (vendor `RFB`, produit
   = modèle du panneau distant, série = MAC) et le « branche » sur un
   device EVDI libre. Le compositeur le pilote comme n'importe quel
-  moniteur ; le serveur récupère les pixels par `libevdi` (curseur
-  incrusté par le noyau).
+  moniteur ; le serveur récupère les pixels par `libevdi` et incruste
+  lui-même le curseur, d'après les événements curseur d'evdi (chaque
+  apparition, disparition, déplacement ou changement de forme ne
+  repeint que l'ancienne et la nouvelle zone du curseur).
 - **Plusieurs clients simultanés** sur un seul port : un device EVDI par
   client (voir « Plusieurs écrans »). Une reconnexion avec le même MAC
   remplace la connexion périmée (SBC redémarré).
