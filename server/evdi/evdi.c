@@ -243,6 +243,7 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
          * creating devices forever when mutter is truly gone) */
         EVS(c->srv)->selfheal_left = 8;
         sremfb_usb_peer_add(c);
+        sremfb_layout_client(c);
         g_message("[%s] streaming %dx%d", c->macstr, mode.width, mode.height);
     }
     sremfb_evdi_kick(c);

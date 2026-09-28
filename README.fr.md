@@ -191,6 +191,7 @@ l'écran « se débranche ».
 | `SREMFB_USB_DENY` (client) | — | ids `vendor[:product]` jamais téléportés |
 | `SREMFB_NO_USB` (serveur) | — | ne jamais attacher les périphériques USB des clients |
 | `SREMFB_INPUT` (serveur) | — | `1` = rejouer clavier/souris/manette des clients admis sur des périphériques uinput (désactivé par défaut) |
+| `SREMFB_LAYOUT` (serveur) | `1` | `0` = ne pas réappliquer la configuration d'écrans mémorisée quand seul le connecteur d'un client a changé (voir les notes) |
 | `SREMFB_AUDIO` (serveur) | `1` | `0` = pas de son pour les clients qui le demandent (sinon : une sortie PipeWire par client, par défaut tant qu'il est connecté ; UDP même port) |
 
 Le client tourne en root par défaut (accès `/dev/fb0` + ioctl console).
@@ -334,13 +335,55 @@ sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
   temps LZ4, temps upload+présentation, délai de file estimé depuis les
   PING. `--dump N` : sauve N frames en PPM (validation sans écran).
 
+## Jouer depuis la visionneuse
+
+Pour jouer aux jeux d'un PC GNOME (Steam…) depuis un autre poste :
+serveur avec `SREMFB_INPUT=1` (et le son, actif par défaut), puis
+`sremfb-view <serveur>` sur le poste. Pour que l'écran virtuel soit
+**le seul écran** pendant la session de jeu — Steam et les jeux s'y
+ouvrent, l'écran physique du serveur s'éteint — et que tout revienne à
+la déconnexion :
+
+1. connecter la visionneuse (son identité doit rester la même : ne pas
+   changer `--mac`/`--model` ensuite) ;
+2. **une seule fois**, sur l'écran virtuel : Réglages → Affichage →
+   « Un seul écran » → l'écran sRemFB (fréquence au choix, 120 Hz
+   possible) → Appliquer → Conserver. mutter mémorise cette
+   configuration pour l'ensemble {écran physique + cet écran virtuel} ;
+3. c'est tout : à chaque connexion l'écran virtuel devient seul et
+   principal (le serveur la réapplique si le connecteur a changé, voir
+   les notes), et à la déconnexion mutter revient à la configuration de
+   l'écran physique seul, qui se rallume en ~3 s.
+
+Sans accès à Réglages (à distance), la même chose en D-Bus :
+`ApplyMonitorsConfig` avec la méthode 2 (persistante) et un seul
+moniteur logique contenant le connecteur de l'écran sRemFB (voir
+`GetCurrentState`). Revenir en arrière : même procédure avec
+« Joindre les écrans » ou « Miroir ».
+
+Si la visionneuse disparaît brutalement (lien coupé), le serveur
+débranche l'écran virtuel au bout de ~6 s et l'écran physique revient ;
+un arrêt du serveur (`systemctl --user stop sremfb-server`, changement
+de mode) le débranche aussi. Ne jamais supprimer `monitors.xml` pendant
+que seul l'écran virtuel est actif.
+
 ## Notes
 
 - La position de chaque écran se règle **une seule fois** dans Réglages →
   Affichage ; GNOME la mémorise dans `~/.config/monitors.xml`, indexée
   sur l'identité EDID (vendor `RFB` / modèle du panneau / série = MAC).
   Changer le panneau branché au SBC change le modèle, donc l'identité —
-  comme un vrai changement de moniteur.
+  comme un vrai changement de moniteur. Piège : mutter indexe aussi
+  chaque configuration sur le **nom du connecteur** (`DVI-I-13`), et
+  celui-ci change dès que les cartes evdi sont recréées (changement de
+  mode, reset) ; mutter ne retrouverait plus rien. Le serveur rattrape
+  ce cas : quand l'écran d'un client s'allume, s'il existe dans
+  `monitors.xml` une configuration des mêmes moniteurs où seul le
+  connecteur de ce client diffère (et pas de correspondance exacte), il
+  la réapplique avec le nouveau nom (`ApplyMonitorsConfig`,
+  persistante) — de préférence celle du connecteur utilisé la fois
+  précédente (`~/.local/state/sremfb/last-connectors`).
+  `SREMFB_LAYOUT=0` pour s'en passer.
 - GNOME compose l'étiquette des Réglages comme « vendor + diagonale ».
   La hwdb udev (`61-sremfb-display-vendor.hwdb`) enregistre le vendor
   EDID `RFB` sous le nom **« 462eng sRemFB »** → « 462eng sRemFB 24" »

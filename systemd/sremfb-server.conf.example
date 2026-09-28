@@ -22,3 +22,8 @@ SREMFB_ALLOW=192.0.2.0/24,127.0.0.0/8
 # connecté, envoyée en PCM brut sur UDP (même numéro de port que le TCP).
 # ACTIVÉ par défaut ; 0 = jamais de son.
 # SREMFB_AUDIO=0
+
+# Configuration d'écrans mémorisée par mutter (~/.config/monitors.xml) :
+# réappliquée quand seul le connecteur DVI-I-N d'un client a changé
+# (cartes evdi recréées). ACTIVÉ par défaut ; 0 = laisser faire mutter.
+# SREMFB_LAYOUT=0

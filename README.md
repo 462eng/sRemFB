@@ -191,6 +191,7 @@ screen "unplugs".
 | `SREMFB_USB_DENY` (client) | — | `vendor[:product]` ids never teleported |
 | `SREMFB_NO_USB` (server) | — | never attach clients' USB devices |
 | `SREMFB_INPUT` (server) | — | `1` = replay allowed clients' keyboard/mouse/gamepad on uinput devices (off by default) |
+| `SREMFB_LAYOUT` (server) | `1` | `0` = don't re-apply the remembered display configuration when only a client's connector changed (see the notes) |
 | `SREMFB_AUDIO` (server) | `1` | `0` = no sound for the clients that ask (otherwise: one PipeWire output per client, the default while it is connected; UDP, same port) |
 
 The client runs as root by default (`/dev/fb0` access + console ioctls).
@@ -328,13 +329,52 @@ sremfb-view [options] <server>       # sremfb-view --help for the details
   time, upload+present time, queueing delay estimated from the PINGs.
   `--dump N`: saves N frames as PPM (validation without a screen).
 
+## Gaming from the viewer
+
+To play a GNOME PC's games (Steam…) from another machine: server with
+`SREMFB_INPUT=1` (and sound, on by default), then `sremfb-view <server>`
+on the machine. To make the virtual screen **the only screen** during
+the gaming session — Steam and the games open there, the server's
+physical screen turns off — and get everything back on disconnect:
+
+1. connect the viewer (its identity must stay the same: don't change
+   `--mac`/`--model` afterwards);
+2. **once**, on the virtual screen: Settings → Displays → "Single
+   Display" → the sRemFB screen (any refresh rate, 120 Hz works) →
+   Apply → Keep. mutter remembers this configuration for the set
+   {physical screen + this virtual screen};
+3. that's it: on every connection the virtual screen becomes the only
+   and primary one (the server re-applies it if the connector changed,
+   see the notes), and on disconnect mutter goes back to the physical
+   screen's own configuration, which lights up again in ~3 s.
+
+Without access to Settings (remotely), the same over D-Bus:
+`ApplyMonitorsConfig` with method 2 (persistent) and a single logical
+monitor holding the sRemFB screen's connector (see `GetCurrentState`).
+To undo: same procedure with "Join Displays" or "Mirror".
+
+If the viewer disappears abruptly (link lost), the server unplugs the
+virtual screen after ~6 s and the physical screen comes back; stopping
+the server (`systemctl --user stop sremfb-server`, a mode switch) unplugs
+it too. Never delete `monitors.xml` while only the virtual screen is
+active.
+
 ## Notes
 
 - Each screen's position is set **once** in Settings → Displays; GNOME
   remembers it in `~/.config/monitors.xml`, indexed on the EDID identity
   (vendor `RFB` / panel model / serial = MAC). Changing the panel
   attached to the SBC changes the model, hence the identity — just like a
-  real monitor swap.
+  real monitor swap. Trap: mutter also keys each configuration on the
+  **connector name** (`DVI-I-13`), which changes whenever the evdi cards
+  are recreated (mode switch, reset); mutter would then find nothing.
+  The server catches that case: when a client's screen lights up, if
+  `monitors.xml` holds a configuration of the same monitors where only
+  this client's connector differs (and no exact match), it re-applies it
+  under the new name (`ApplyMonitorsConfig`, persistent) — preferably
+  the one of the connector used last time
+  (`~/.local/state/sremfb/last-connectors`). `SREMFB_LAYOUT=0` to go
+  without.
 - GNOME builds the Settings label as "vendor + diagonal". The udev hwdb
   (`61-sremfb-display-vendor.hwdb`) registers the EDID vendor `RFB` under
   the name **"462eng sRemFB"** → "462eng sRemFB 24\"" (after a session

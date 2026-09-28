@@ -27,7 +27,7 @@ int main(int argc, char **argv)
         } else {
             g_printerr("usage: %s [--port N] [--allow CIDR,CIDR...]\n"
                        "  (env: SREMFB_PORT, SREMFB_ALLOW, SREMFB_INPUT=1, "
-                       "SREMFB_AUDIO=0)\n",
+                       "SREMFB_AUDIO=0, SREMFB_LAYOUT=0)\n",
                        argv[0]);
             return 2;
         }
@@ -95,6 +95,7 @@ int main(int argc, char **argv)
     server.src = &evdi;
 
     sremfb_audio_init(&server);        /* UDP port = the TCP port */
+    sremfb_layout_init(&server);
 
     int rc = sremfb_serve(&server);
 

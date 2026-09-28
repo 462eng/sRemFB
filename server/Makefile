@@ -11,7 +11,7 @@ LDLIBS = $(shell pkg-config --libs $(PKGS)) -levdi -lm
 
 CORE_OBJS = core/net.o core/convert.o core/control.o core/encoder.o \
             core/xmit.o core/session.o core/input.o \
-            core/audio.o
+            core/audio.o core/layout.o
 EVDI_OBJS = evdi/evdi.o evdi/edid.o main-evdi.o
 
 all: sremfb-server sremfb-latency-click

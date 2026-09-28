@@ -104,6 +104,8 @@ struct SremfbClient {
     char connector[32];        /* compositor connector name of the client's
                                   virtual screen ("DVI-I-2"), set by the
                                   source; maps absolute pointer events */
+    gboolean layout_pending;   /* layout.c: remembered configuration not
+                                  checked yet for this connection */
 
     /* upstream (PONG) reassembly */
     uint8_t recvbuf[1024];
@@ -239,6 +241,11 @@ uint8_t  sremfb_audio_start(SremfbClient *c);      /* at STREAMING entry:
                                                       when the output exists */
 void     sremfb_audio_stop(SremfbClient *c);
 void     sremfb_audio_shutdown(void);              /* restores the default */
+
+/* layout.c — remembered monitor configuration, re-applied when only the
+ * client's connector name changed */
+void sremfb_layout_init(SremfbServer *srv);        /* unless SREMFB_LAYOUT=0 */
+void sremfb_layout_client(SremfbClient *c);        /* at STREAMING entry */
 
 /* xmit.c — per-client non-blocking transmit queue */
 void sremfb_xmit_damage(SremfbClient *c, const struct sremfb_rect *rects,
