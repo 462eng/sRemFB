@@ -48,6 +48,12 @@ if [ "${1:-}" = --detach-all ]; then
     exit 0
 fi
 
+# Pendant un arrêt du système, ne rien rattacher (le timer ou le .path
+# peuvent encore déclencher un passage) : seul --detach-all a du sens.
+case "$(systemctl is-system-running 2>/dev/null)" in
+    stopping) exit 0 ;;
+esac
+
 # --- purge/détachement ---------------------------------------------------
 for rec in /var/run/vhci_hcd/port*; do
     [ -f "$rec" ] || continue

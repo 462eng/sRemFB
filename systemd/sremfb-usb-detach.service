@@ -5,15 +5,19 @@
 # ExecStop=, joué à l'arrêt du système. After=network.target
 # network-online.target l'arrête AVANT le réseau : usbip detach ferme
 # chaque connexion TCP proprement et le client (usbip-host, sans
-# keepalive) remet aussitôt ses périphériques à disposition. Before= les
-# unités du réconciliateur : elles sont arrêtées d'abord, rien ne
-# rattache pendant le détachement. Pas de nouveau job à lancer pendant
+# keepalive) remet aussitôt ses périphériques à disposition.
+# Before=sremfb-usb.service seulement : le réconciliateur est arrêté
+# d'abord. Surtout pas Before= sur sremfb-usb.path/.timer : ils sont
+# ordonnés avant paths.target/timers.target, donc avant basic.target,
+# alors que ce service passe après basic.target — cycle, et systemd
+# supprime le job d'arrêt de cette unité (vu le 28/09/2026). Le script
+# refuse en plus tout rattachement pendant un arrêt du système. Pas de nouveau job à lancer pendant
 # le shutdown (qui peut être refusé) : le stop de cette unité fait
 # partie de la transaction d'arrêt.
 [Unit]
 Description=sRemFB USB teleport: detach usbip imports before the network goes down
 After=network.target network-online.target
-Before=sremfb-usb.path sremfb-usb.timer sremfb-usb.service
+Before=sremfb-usb.service
 
 [Service]
 Type=oneshot
