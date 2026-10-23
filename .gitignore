@@ -8,3 +8,5 @@ dist/
 pkg/sysroot/
 .claude/
 server/sremfb-latency-click
+server/sremfb-kvm
+server/kvm/test-kvm
