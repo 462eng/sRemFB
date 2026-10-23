@@ -5,14 +5,17 @@
  * like an SBC client would, and shows it in a resizable window.
  *
  * Built for latency first:
- *   - a network thread (net.c) receives and decodes (LZ4) as soon as
- *     bytes arrive and echoes the server's PINGs;
+ *   - a network thread (net.c) receives and decodes (LZ4, H.264) as
+ *     soon as bytes arrive and echoes the server's PINGs;
  *   - the main thread uploads only the damaged rects to a streaming
  *     texture and presents the newest picture — there is no frame queue
  *     anywhere, a late frame is merged into the next upload;
  *   - vsync is off unless --vsync;
- *   - no H.264 capability is advertised: the stream stays on independent
- *     damage rects (RAW/LZ4).
+ *   - the stream is independent damage rects (RAW/LZ4); with H264=1 the
+ *     H.264 capability is advertised too (unless --no-h264), and the
+ *     server switches to it only under measured congestion — each access
+ *     unit is decoded synchronously (libavcodec, h264.c) into the same
+ *     wire-format framebuffer, so the display side never changes.
  *
  * Keyboard, mouse and gamepad are forwarded to the server's uinput
  * devices once it accepted INPUT (input_event() below); the wire pixel
@@ -1197,6 +1200,7 @@ static void update_title(double fps)
 struct snap {
     unsigned long long batches, rects, bytes, dec_ns, dec_n, pings, pq_us;
     unsigned long long presents, pres_ns;
+    unsigned long long h_aus, h_idrs, h_ns, h_eps;
     unsigned long long a_pk, a_lost, a_late, a_drop, a_under, a_restart,
                        a_owd, a_owd_n, a_lvl, a_lvl_n;
 };
@@ -1211,6 +1215,10 @@ static void snap_take(struct snap *s)
     s->pings = atomic_load(&ST.pings);
     s->pq_us = atomic_load(&ST.ping_queue_us);
     s->presents = atomic_load(&ST.presents);
+    s->h_aus = atomic_load(&ST.h264_aus);
+    s->h_idrs = atomic_load(&ST.h264_idrs);
+    s->h_ns = atomic_load(&ST.h264_ns);
+    s->h_eps = atomic_load(&ST.h264_episodes);
     s->pres_ns = atomic_load(&ST.present_ns);
     s->a_pk = atomic_load(&ST.a_packets);
     s->a_lost = atomic_load(&ST.a_lost);
@@ -1245,6 +1253,17 @@ static void print_stats(const struct snap *a, const struct snap *b,
             atomic_load(&ST.tcp_rtt_us) / 1000.0,
             pings ? (double)(b->pq_us - a->pq_us) / (double)pings / 1000.0 : 0.0,
             D.connected ? "" : " [not connected]");
+
+    unsigned long long aus = b->h_aus - a->h_aus;
+    int h264 = atomic_load(&ST.h264_active);
+    if (aus || h264 || b->h_eps != a->h_eps)
+        fprintf(stderr,
+                "sremfb-view: h264: mode %s | %.1f AU/s (%llu, %llu IDR) | "
+                "decode+convert %.3f ms/AU | %llu episode(s) ended\n",
+                h264 ? "H.264" : "RAW/LZ4", (double)aus / dt, aus,
+                b->h_idrs - a->h_idrs,
+                aus ? (double)(b->h_ns - a->h_ns) / (double)aus / 1e6 : 0.0,
+                b->h_eps - a->h_eps);
 
     if (!atomic_load(&ST.a_active))
         return;
@@ -1288,6 +1307,8 @@ static void usage(FILE *out)
 "      --rgb565         ask for 16-bit RGB565 pixels (half the bandwidth,\n"
 "                       dithered by the server) instead of XRGB8888\n"
 "      --no-lz4         don't accept LZ4 (raw pixels only)\n"
+"      --no-h264        don't offer H.264 (also SREMFB_NO_H264=1; the\n"
+"                       server then never leaves RAW/LZ4)%s\n"
 "      --vsync          sync presentation to the display (default: off,\n"
 "                       lowest latency, may tear)\n"
 "  -f, --fullscreen     start fullscreen\n"
@@ -1323,7 +1344,13 @@ static void usage(FILE *out)
 "                       wheel, pad, padaxis, shot FILE, quit...)\n"
 "  -h, --help           this help\n"
 "  -V, --version        print the version\n",
-            ESC_HOLD_MS / 1000, SREMFB_DEFAULT_PORT, STATS_EVERY_MS / 1000);
+            ESC_HOLD_MS / 1000, SREMFB_DEFAULT_PORT,
+#ifdef SREMFB_VIEW_H264
+            "",
+#else
+            "\n                       (this build has no H.264: always)",
+#endif
+            STATS_EVERY_MS / 1000);
 }
 
 static unsigned parse_count(const char *s, const char *what)
@@ -1343,6 +1370,7 @@ enum {
     OPT_MAC, OPT_MODEL, OPT_STATS, OPT_DUMP, OPT_DUMP_EVERY, OPT_DUMP_DIR,
     OPT_NO_INPUT, OPT_LAT, OPT_LAT_INPUT, OPT_LAT_AT, OPT_TEST,
     OPT_NO_AUDIO, OPT_AUDIO_BUFFER, OPT_AUDIO_FRAMES, OPT_AUDIO_DUMP,
+    OPT_NO_H264,
 };
 
 static void parse_args(int argc, char **argv)
@@ -1352,6 +1380,7 @@ static void parse_args(int argc, char **argv)
         { "port",       required_argument, NULL, 'p' },
         { "rgb565",     no_argument,       NULL, OPT_RGB565 },
         { "no-lz4",     no_argument,       NULL, OPT_NO_LZ4 },
+        { "no-h264",    no_argument,       NULL, OPT_NO_H264 },
         { "vsync",      no_argument,       NULL, OPT_VSYNC },
         { "fullscreen", no_argument,       NULL, 'f' },
         { "nearest",    no_argument,       NULL, OPT_NEAREST },
@@ -1413,6 +1442,7 @@ static void parse_args(int argc, char **argv)
             break;
         case OPT_RGB565:     O.o.pixfmt = SREMFB_PIX_RGB565; break;
         case OPT_NO_LZ4:     O.o.no_lz4 = 1; break;
+        case OPT_NO_H264:    O.o.no_h264 = 1; break;
         case OPT_VSYNC:      O.vsync = 1; break;
         case 'f':            O.fullscreen = 1; break;
         case OPT_NEAREST:    O.nearest = 1; break;
@@ -1489,6 +1519,11 @@ static void parse_args(int argc, char **argv)
         exit(2);
     }
     O.o.server = argv[optind];
+    if (getenv("SREMFB_NO_H264"))
+        O.o.no_h264 = 1;
+#ifndef SREMFB_VIEW_H264
+    O.o.no_h264 = 1;                    /* built with H264=0 */
+#endif
     if (!have_mac)
         derive_mac(O.o.mac);
     if ((LAT.n || O.test) && O.o.no_input) {

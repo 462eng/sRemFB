@@ -55,9 +55,13 @@ section « Visionneuse fenêtrée ». Hors de `make` par défaut, pour ne pas
 imposer SDL3 aux builds serveur et SBC.
 
 ```sh
-sudo apt install build-essential liblz4-dev libsdl3-dev
+sudo apt install build-essential liblz4-dev libsdl3-dev \
+                 libavcodec-dev libavutil-dev
 make view
 ```
+
+`libavcodec`/`libavutil` (FFmpeg) décodent le H.264 ; `make -C view
+H264=0` construit sans eux (la visionneuse n'annonce alors jamais H.264).
 
 ## Build local
 
@@ -163,9 +167,11 @@ Détails :
   sudo apt update
   ```
 
-- **Visionneuse** : compilée avec `make -C view` (il faut `libsdl3-dev`) ;
-  ses dépendances (`libsdl3-0`, `liblz4-1`, `libc6`) sont calculées par
-  `dpkg-shlibdeps` (paquet `dpkg-dev`). amd64 seulement.
+- **Visionneuse** : compilée avec `make -C view` (il faut `libsdl3-dev`,
+  `libavcodec-dev` et `libavutil-dev` ; `VIEW_H264=0` pour s'en passer) ;
+  ses dépendances (`libsdl3-0`, `liblz4-1`, `libavcodec61`,
+  `libavutil59`, `libc6`) sont calculées par `dpkg-shlibdeps` (paquet
+  `dpkg-dev`). amd64 seulement.
 - **Le module noyau n'est pas repackagé** : `evdi-dkms` existe dans
   Debian et n'est requis que côté serveur (déclaré en `Depends`).
 - Les paquets **remplacent** les anciens `rfb-server`/`rfb-client`

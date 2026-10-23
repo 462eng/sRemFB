@@ -55,9 +55,13 @@ Not part of the default `make`, so SDL3 is never required for server and
 SBC builds.
 
 ```sh
-sudo apt install build-essential liblz4-dev libsdl3-dev
+sudo apt install build-essential liblz4-dev libsdl3-dev \
+                 libavcodec-dev libavutil-dev
 make view
 ```
+
+`libavcodec`/`libavutil` (FFmpeg) decode H.264; `make -C view H264=0`
+builds without them (the viewer then never advertises H.264).
 
 ## Local build
 
@@ -159,9 +163,11 @@ Details:
   sudo apt update
   ```
 
-- **Viewer**: built with `make -C view` (needs `libsdl3-dev`); its
-  dependencies (`libsdl3-0`, `liblz4-1`, `libc6`) are computed by
-  `dpkg-shlibdeps` (package `dpkg-dev`). amd64 only.
+- **Viewer**: built with `make -C view` (needs `libsdl3-dev`,
+  `libavcodec-dev` and `libavutil-dev`; `VIEW_H264=0` to do without);
+  its dependencies (`libsdl3-0`, `liblz4-1`, `libavcodec61`,
+  `libavutil59`, `libc6`) are computed by `dpkg-shlibdeps` (package
+  `dpkg-dev`). amd64 only.
 - **The kernel module is not repackaged**: `evdi-dkms` exists in Debian
   and is only needed on the server side (declared as a `Depends`).
 - The packages **replace** the old `rfb-server`/`rfb-client`

@@ -8,3 +8,4 @@ dist/
 pkg/sysroot/
 .claude/
 server/sremfb-latency-click
+view/.build-flags

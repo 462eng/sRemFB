@@ -15,7 +15,9 @@
 #
 # Prérequis : gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf, et les
 # architectures arm64/armhf activées dans dpkg pour apt-get download ;
-# libsdl3-dev et dpkg-dev (dpkg-shlibdeps) pour la visionneuse.
+# libsdl3-dev, libavcodec-dev, libavutil-dev (décodage H.264) et dpkg-dev
+# (dpkg-shlibdeps) pour la visionneuse. VIEW_H264=0 construit la
+# visionneuse sans H.264 (ni libavcodec).
 
 VERSION=${1:-1.5.0}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
@@ -65,7 +67,8 @@ build_client() { # $1 = debian arch, $2 = triplet gcc
     "$2-strip" "$STAGE/sremfb-client-$1"
 }
 echo "== build visionneuse (amd64)"
-make -s -B -C "$TOP/view" VERSION="$VERSION"
+VIEW_H264=${VIEW_H264:-1}
+make -s -B -C "$TOP/view" VERSION="$VERSION" H264="$VIEW_H264"
 
 build_client arm64 aarch64-linux-gnu
 build_client armhf arm-linux-gnueabihf
@@ -283,7 +286,10 @@ printf 'Source: sremfb\n\nPackage: sremfb-view\nArchitecture: amd64\n' \
 VIEW_DEPS=$(cd "$STAGE/view" && dpkg-shlibdeps -O \
     -e"debian/sremfb-view/usr/bin/sremfb-view" 2>/dev/null |
     sed -n 's/^shlibs:Depends=//p')
-[ -n "$VIEW_DEPS" ] || VIEW_DEPS="libc6, liblz4-1, libsdl3-0"
+if [ -z "$VIEW_DEPS" ]; then
+    VIEW_DEPS="libc6, liblz4-1, libsdl3-0"
+    [ "$VIEW_H264" = 0 ] || VIEW_DEPS="$VIEW_DEPS, libavcodec61, libavutil59"
+fi
 make_deb sremfb-view amd64 \
 "Depends: $VIEW_DEPS
 Description: sRemFB, écran virtuel réseau — visionneuse fenêtrée
@@ -291,7 +297,8 @@ Description: sRemFB, écran virtuel réseau — visionneuse fenêtrée
  fenêtre (SDL3, Wayland natif ou X11) sur un PC Linux. Relaie clavier,
  souris et manette quand le serveur l'autorise (SREMFB_INPUT=1) et joue
  le son du bureau distant (serveur ≥ 1.5.0). Avec un serveur plus ancien :
- image seule."
+ image seule. Décode le H.264 (libavcodec) quand le serveur y bascule
+ sous congestion."
 
 echo "== paquets dans $DIST :"
 ls -l "$DIST"
