@@ -9,3 +9,6 @@ pkg/sysroot/
 .claude/
 server/sremfb-latency-click
 view/.build-flags
+server/sremfb-kvm
+server/kvm/test-kvm
+server/kvm/.encoder-*
