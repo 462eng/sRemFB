@@ -207,7 +207,7 @@ l'écran « se débranche ».
 | `SREMFB_MODEL` (client) | auto | forcer le nom de modèle annoncé (13 car. max) |
 | `SREMFB_NO_LZ4` (client) | — | forcer le raw (A/B test compression) |
 | `SREMFB_NO_DITHER` (serveur) | — | couper le dithering RGB565 (A/B test) |
-| `SREMFB_NO_H264` (client) | — | ne pas annoncer le décodeur H.264 matériel |
+| `SREMFB_NO_H264` (client) | — | ne pas annoncer le décodeur H.264 matériel (`sremfb-view` : comme `--no-h264`) |
 | `SREMFB_NO_H264` (serveur) | — | ne jamais basculer en H.264 (le délai reste mesuré/loggé) |
 | `SREMFB_FORCE_H264` (serveur) | — | épingler le H.264 sur les clients capables (A/B test) |
 | `SREMFB_NO_HOTPLUG` (client) | — | ne pas surveiller le connecteur DRM de la dalle |
@@ -292,8 +292,12 @@ sremfb-view [options] <serveur>      # sremfb-view --help pour tout le détail
   (LZ4) dès l'arrivée des octets et renvoie les PING ; le thread
   d'affichage n'envoie au GPU que les rectangles modifiés et présente
   toujours l'image la plus récente — aucune file de frames. VSync coupée
-  par défaut (`--vsync` pour l'activer). **Jamais de H.264** : la
-  capacité n'est pas annoncée, le flux reste en rectangles RAW/LZ4.
+  par défaut (`--vsync` pour l'activer). Le flux reste en rectangles
+  RAW/LZ4 ; la capacité **H.264** est annoncée (sauf `--no-h264` ou
+  `SREMFB_NO_H264=1`) et le serveur n'y bascule que sous congestion
+  mesurée : décodage libavcodec synchrone dans le thread réseau, puis
+  retour en RAW/LZ4 à la fin de l'épisode ; une panne du décodeur le
+  désactive pour la session.
 - Géométrie `--size WxH` (défaut 1920x1080), XRGB8888 ou `--rgb565`
   (moitié du débit, tramé par le serveur).
 - Identité : MAC **localement administrée** dérivée de

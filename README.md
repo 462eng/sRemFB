@@ -203,7 +203,7 @@ screen "unplugs".
 | `SREMFB_MODEL` (client) | auto | override the announced model name (13 chars max) |
 | `SREMFB_NO_LZ4` (client) | — | force raw (compression A/B test) |
 | `SREMFB_NO_DITHER` (server) | — | disable RGB565 dithering (A/B test) |
-| `SREMFB_NO_H264` (client) | — | don't advertise the hardware H.264 decoder |
+| `SREMFB_NO_H264` (client) | — | don't advertise the hardware H.264 decoder (`sremfb-view`: same as `--no-h264`) |
 | `SREMFB_NO_H264` (server) | — | never switch to H.264 (delay still measured/logged) |
 | `SREMFB_FORCE_H264` (server) | — | pin H.264 on capable clients (A/B test) |
 | `SREMFB_NO_HOTPLUG` (client) | — | don't watch the panel's DRM connector |
@@ -286,8 +286,11 @@ sremfb-view [options] <server>       # sremfb-view --help for the details
   (LZ4) as soon as bytes arrive and echoes the PINGs; the display thread
   uploads only the damaged rects and always presents the newest picture
   — no frame queue anywhere. VSync is off by default (`--vsync` to turn
-  it on). **Never H.264**: the capability isn't advertised, the stream
-  stays on RAW/LZ4 rects.
+  it on). The stream stays on RAW/LZ4 rects; the **H.264** capability is
+  advertised (unless `--no-h264` or `SREMFB_NO_H264=1`) and the server
+  only switches to it under measured congestion: synchronous libavcodec
+  decoding in the network thread, back to RAW/LZ4 when the episode ends;
+  a decoder failure disables it for the session.
 - Geometry `--size WxH` (default 1920x1080), XRGB8888 or `--rgb565`
   (half the bandwidth, dithered by the server).
 - Identity: a **locally administered** MAC derived from
