@@ -6,7 +6,7 @@
  * The contract is a single "latest picture" mailbox, never a queue:
  *
  *   - The network thread owns the socket. It reads every message as soon
- *     as it arrives, decodes it (LZ4 today, JPEG tiles tomorrow) into a
+ *     as it arrives, decodes it (LZ4, or H.264 with H264=1) into a
  *     private scratch buffer, then — under fb.lock — copies the pixels
  *     into the shared framebuffer and appends the rect to the pending
  *     damage list. When it has caught up with the socket (or a batch has
@@ -106,6 +106,11 @@ struct view_stats {
     atomic_ullong ping_queue_us;    /* sum over the pings of the queueing
                                        excess (see net.c) */
     atomic_uint tcp_rtt_us;         /* kernel smoothed RTT (TCP_INFO) */
+    atomic_int h264_active;         /* inside an H.264 episode */
+    atomic_ullong h264_aus;         /* access units received */
+    atomic_ullong h264_idrs;        /* ... flagged IDR by the server */
+    atomic_ullong h264_ns;          /* decode + convert + copy, per AU */
+    atomic_ullong h264_episodes;    /* H264_EOS received */
     /* audio thread (audio.c) */
     atomic_int a_active;            /* an audio flow is up */
     atomic_ullong a_packets, a_lost, a_late, a_dropped, a_underruns,
@@ -126,6 +131,8 @@ struct view_opts {
     unsigned req_w, req_h;          /* --size */
     uint8_t pixfmt;                 /* requested wire format */
     int no_lz4;
+    int no_h264;                    /* never offer H264 (--no-h264,
+                                       SREMFB_NO_H264, or H264=0 build) */
     int no_input;                   /* never offer INPUT (view only) */
     int no_audio;                   /* never offer AUDIO */
     double audio_target_ms;         /* jitter buffer target */
@@ -160,6 +167,33 @@ struct view_audio *view_audio_start(const struct sockaddr *srv,
                                     struct view_stats *st,
                                     struct view_audio_probe *probe);
 void view_audio_stop(struct view_audio *a);
+
+#ifdef SREMFB_VIEW_H264
+/* H.264 decoder (h264.c, libavcodec). One per connection, opened on the
+ * first access unit. */
+struct view_h264;
+
+/* One decoded 4:2:0 picture; valid until the next receive/flush/close. */
+struct view_h264_pic {
+    const uint8_t *plane[3];        /* Y, U, V */
+    int stride[3];
+    unsigned w, h;
+    int key;
+};
+
+struct view_h264 *view_h264_open(void);
+/* One access unit (au must be followed by AV_INPUT_BUFFER_PADDING_SIZE
+ * readable bytes), or NULL to drain at the end of an episode. 0 / -1. */
+int view_h264_send(struct view_h264 *d, const uint8_t *au, size_t len);
+/* 1 = picture in *p, 0 = none pending (or drained), -1 = error. */
+int view_h264_receive(struct view_h264 *d, struct view_h264_pic *p);
+void view_h264_flush(struct view_h264 *d);   /* after a drain: new episode */
+void view_h264_close(struct view_h264 *d);
+/* Picture -> wire format rows (BT.601 limited, RGB565 dithered). */
+void view_h264_convert(const struct view_h264_pic *p, uint8_t *dst,
+                       size_t dst_stride, unsigned w, unsigned h,
+                       uint8_t pixfmt);
+#endif
 
 /* SDL scancode -> evdev KEY_* code, 0 = no equivalent (keymap.c). */
 int view_scancode_to_evdev(int scancode);

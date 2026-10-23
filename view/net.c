@@ -2,13 +2,21 @@
 /*
  * sremfb-view network thread: connect, hello, receive + decode, PONG.
  *
- * Speaks protocol v2 exactly like the SBC client (see PROTOCOL.md), minus
- * the H.264 capability, which is never advertised: this viewer is meant
- * for latency-critical use and stays on the damage-rect RAW/LZ4 path.
- * It offers INPUT (unless --no-input) and AUDIO (unless --no-audio: the
+ * Speaks protocol v2 exactly like the SBC client (see PROTOCOL.md). It
+ * offers INPUT (unless --no-input) and AUDIO (unless --no-audio: the
  * sound then runs on its own UDP flow and thread, audio.c); the main
- * thread only sends input
- * events once the server hello confirmed it (fb->input).
+ * thread only sends input events once the server hello confirmed it
+ * (fb->input).
+ *
+ * H.264 (built with H264=1, unless --no-h264 / SREMFB_NO_H264): the
+ * server switches the stream to H.264 under measured congestion. Each
+ * access unit is decoded synchronously here (h264.c), converted to the
+ * wire format into the shared framebuffer and published at once — so a
+ * PONG still means "everything before it is applied", decoder included.
+ * H264_EOS drains the decoder before the next message (the RAW/LZ4
+ * snapshot that follows must land on top of the last picture). A decoder
+ * failure drops the connection and stops offering H.264 for the rest of
+ * the process (h264_broken), like the SBC client.
  *
  * Everything that can block — connect, reads, the reconnect backoff —
  * polls the socket together with an eventfd, so view_net_stop() returns
@@ -40,6 +48,10 @@
 
 #include <lz4.h>
 
+#ifdef SREMFB_VIEW_H264
+#include <libavcodec/avcodec.h>      /* AV_INPUT_BUFFER_PADDING_SIZE */
+#endif
+
 #include "view.h"
 
 #define BATCH_MAX_NS      2000000ull  /* publish a batch after 2 ms anyway */
@@ -50,6 +62,14 @@
                                          (the server heartbeats every ~2 s) */
 #define SEND_TIMEOUT      2000        /* ms, upstream messages are tiny */
 #define BACKOFF_MAX       5           /* s */
+#define AU_CAP            (1u << 20)  /* largest H.264 access unit */
+#define AU_SILENT_MAX     3           /* access units in a row without a
+                                         picture before the decoder counts
+                                         as failed (LOW_DELAY, no B-frames:
+                                         each AU should give one at once) */
+#define PROBE_TOLERANCE   48          /* H.264 probe: per-channel change
+                                         (8-bit scale) that counts as a hit,
+                                         well above quantization noise */
 
 struct view_net {
     struct view_opts o;
@@ -70,6 +90,10 @@ struct view_net {
     int64_t ping_min_off_us;    /* min(arrival - server clock) seen */
     int have_ping_off;
     uint16_t audio_token;
+    int h264_offered;           /* this connection's hello carried H264 */
+
+    int h264_broken;            /* the decoder failed once: never offer
+                                   H.264 again in this process */
 };
 
 static uint64_t now_ns(void)
@@ -236,7 +260,13 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
         ch.flags |= SREMFB_HELLO_FLAG_INPUT;
     if (!n->o.no_audio)
         ch.flags |= SREMFB_HELLO_FLAG_AUDIO;
-    /* never SREMFB_HELLO_FLAG_H264: no inter-frame codec in this viewer */
+#ifdef SREMFB_VIEW_H264
+    n->h264_offered = !n->o.no_h264 && !n->h264_broken;
+#else
+    n->h264_offered = 0;
+#endif
+    if (n->h264_offered)
+        ch.flags |= SREMFB_HELLO_FLAG_H264;
     ch.xres = (uint16_t)n->o.req_w;
     ch.yres = (uint16_t)n->o.req_h;
     ch.pixfmt = n->o.pixfmt;
@@ -306,6 +336,13 @@ static int hello_exchange(struct view_net *n, unsigned *w, unsigned *h)
                  "offered by the server" :
                  "not offered by the server (SREMFB_AUDIO=0, no PipeWire "
                  "or older server)");
+    if (n->h264_offered)
+        view_log("H.264 %s", (sh.flags & SREMFB_SRV_FLAG_H264) ?
+                 "possible (the server may switch under congestion)" :
+                 "not offered by the server (SREMFB_NO_H264, no x264 or "
+                 "older server)");
+    else if (n->h264_broken)
+        view_log("H.264 not offered: the decoder failed earlier");
     return 0;
 }
 
@@ -456,6 +493,185 @@ static int on_ping(struct view_net *n, uint64_t t_srv_us)
     return 0;
 }
 
+#ifdef SREMFB_VIEW_H264
+/* 8-bit channels of a wire pixel. */
+static void pixel_rgb(const struct view_fb *fb, uint32_t px, int c[3])
+{
+    if (fb->bytespp == 2) {
+        c[0] = (int)((px >> 11) & 0x1F) * 255 / 31;
+        c[1] = (int)((px >> 5) & 0x3F) * 255 / 63;
+        c[2] = (int)(px & 0x1F) * 255 / 31;
+    } else {
+        c[0] = (int)((px >> 16) & 0xFF);
+        c[1] = (int)((px >> 8) & 0xFF);
+        c[2] = (int)(px & 0xFF);
+    }
+}
+
+/* H.264 is lossy: the probe pixel only counts as changed once a channel
+ * moved by more than the quantization noise. */
+static int pixel_moved(const struct view_fb *fb, uint32_t a, uint32_t b)
+{
+    int ca[3], cb[3];
+
+    pixel_rgb(fb, a, ca);
+    pixel_rgb(fb, b, cb);
+    for (int i = 0; i < 3; i++)
+        if (abs(ca[i] - cb[i]) > PROBE_TOLERANCE)
+            return 1;
+    return 0;
+}
+
+/* Per-connection H.264 state; the decoder is opened on the first AU. */
+struct h264_conn {
+    struct view_h264 *dec;
+    uint8_t *aubuf;             /* AU_CAP + padding, lazy */
+    unsigned long long aus;     /* in the current episode */
+    unsigned silent;            /* AUs in a row that gave no picture */
+    int warned_geom;
+};
+
+/* One decoded picture -> wire format -> shared framebuffer, published at
+ * once (one AU = one picture, no batching). `scratch` is the stream-size
+ * conversion buffer, so the lock is only held for the copy. */
+static void h264_show(struct view_net *n, struct h264_conn *hc,
+                      const struct view_h264_pic *p, uint8_t *scratch,
+                      unsigned w, unsigned h)
+{
+    struct view_fb *fb = n->fb;
+    unsigned cw = p->w < w ? p->w : w, ch = p->h < h ? p->h : h;
+    size_t stride = (size_t)w * (n->o.pixfmt == SREMFB_PIX_RGB565 ? 2 : 4);
+
+    if ((p->w != w || p->h != h) && !hc->warned_geom) {
+        view_log("H.264 picture %ux%u in a %ux%u stream, showing the "
+                 "overlap", p->w, p->h, w, h);
+        hc->warned_geom = 1;
+    }
+    view_h264_convert(p, scratch, stride, cw, ch, n->o.pixfmt);
+
+    pthread_mutex_lock(&fb->lock);
+    size_t row = (size_t)cw * fb->bytespp;
+    if (row == fb->stride && ch == h) {
+        memcpy(fb->pixels, scratch, row * ch);
+    } else {
+        for (unsigned y = 0; y < ch; y++)
+            memcpy(fb->pixels + y * fb->stride, scratch + y * stride, row);
+    }
+    fb->damage_all = 1;
+    fb->damage_n = 0;
+    if (fb->probe_armed && fb->probe_x < cw && fb->probe_y < ch &&
+        pixel_moved(fb, view_fb_pixel(fb, fb->probe_x, fb->probe_y),
+                    fb->probe_base)) {
+        fb->probe_hit_ns = now_ns();
+        fb->probe_armed = 0;
+    }
+    pthread_mutex_unlock(&fb->lock);
+    publish(n);
+}
+
+/* Pulls every picture the decoder has ready. Returns how many, or -1
+ * on decoder failure. */
+static int h264_pull(struct view_net *n, struct h264_conn *hc,
+                     uint8_t *scratch, unsigned w, unsigned h)
+{
+    struct view_h264_pic p;
+    int r, shown = 0;
+
+    while ((r = view_h264_receive(hc->dec, &p)) == 1) {
+        h264_show(n, hc, &p, scratch, w, h);
+        shown++;
+    }
+    return r < 0 ? -1 : shown;
+}
+
+static void h264_failed(struct view_net *n)
+{
+    view_log("H.264 decoder failed — reconnecting without it");
+    n->h264_broken = 1;
+}
+
+/* SREMFB_ENC_H264: read, decode, show. -1 drops the connection. */
+static int h264_au(struct view_net *n, struct h264_conn *hc,
+                   const struct sremfb_frame_hdr *hd, uint8_t *scratch,
+                   unsigned w, unsigned h, int timeout)
+{
+    if (hd->x != 0 || hd->y != 0 || hd->w != w || hd->h != h) {
+        view_log("bad H.264 rect %ux%u+%u+%u (stream %ux%u)", hd->w, hd->h,
+                 hd->x, hd->y, w, h);
+        return -1;
+    }
+    if (hd->payload_len == 0 || hd->payload_len > AU_CAP) {
+        view_log("bad H.264 payload len %u", hd->payload_len);
+        return -1;
+    }
+    if (!hc->aubuf &&
+        !(hc->aubuf = malloc(AU_CAP + AV_INPUT_BUFFER_PADDING_SIZE))) {
+        view_log("out of memory");
+        return -1;
+    }
+    if (readn(n, hc->aubuf, hd->payload_len, timeout) < 0)
+        return -1;
+    memset(hc->aubuf + hd->payload_len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+
+    uint64_t t0 = now_ns();
+    if (!hc->dec && !(hc->dec = view_h264_open())) {
+        h264_failed(n);
+        return -1;
+    }
+    if (!atomic_load_explicit(&n->st->h264_active, memory_order_relaxed)) {
+        view_log("H.264 episode starts%s",
+                 (hd->reserved[0] & SREMFB_H264_FLAG_IDR) ? "" :
+                 " (first access unit not flagged IDR)");
+        atomic_store(&n->st->h264_active, 1);
+        hc->aus = 0;
+        hc->silent = 0;
+    }
+    int shown;
+    if (view_h264_send(hc->dec, hc->aubuf, hd->payload_len) < 0 ||
+        (shown = h264_pull(n, hc, scratch, w, h)) < 0) {
+        h264_failed(n);
+        return -1;
+    }
+    hc->silent = shown ? 0 : hc->silent + 1;
+    if (hc->silent >= AU_SILENT_MAX) {
+        view_log("H.264: %u access units without a picture (episode not "
+                 "opened by an IDR?)", hc->silent);
+        h264_failed(n);
+        return -1;
+    }
+    hc->aus++;
+    atomic_fetch_add_explicit(&n->st->h264_ns, now_ns() - t0,
+                              memory_order_relaxed);
+    atomic_fetch_add_explicit(&n->st->h264_aus, 1, memory_order_relaxed);
+    if (hd->reserved[0] & SREMFB_H264_FLAG_IDR)
+        atomic_fetch_add_explicit(&n->st->h264_idrs, 1,
+                                  memory_order_relaxed);
+    return 0;
+}
+
+/* SREMFB_ENC_H264_EOS: drain (show every remaining picture), reset the
+ * decoder for the next episode, and only then read on — the RAW/LZ4
+ * snapshot that follows must land on top. */
+static int h264_eos(struct view_net *n, struct h264_conn *hc,
+                    uint8_t *scratch, unsigned w, unsigned h)
+{
+    if (hc->dec) {
+        if (view_h264_send(hc->dec, NULL, 0) < 0 ||
+            h264_pull(n, hc, scratch, w, h) < 0) {
+            h264_failed(n);
+            return -1;
+        }
+        view_h264_flush(hc->dec);
+    }
+    if (atomic_exchange(&n->st->h264_active, 0))
+        view_log("H.264 episode over after %llu access units, back to "
+                 "RAW/LZ4", hc->aus);
+    atomic_fetch_add_explicit(&n->st->h264_episodes, 1,
+                              memory_order_relaxed);
+    return 0;
+}
+#endif
+
 static void stream_loop(struct view_net *n, unsigned w, unsigned h)
 {
     unsigned bytespp = n->o.pixfmt == SREMFB_PIX_RGB565 ? 2 : 4;
@@ -466,6 +682,9 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
     uint8_t *pixels = calloc(frame_cap, 1);
     int timeout = (n->srv_flags & SREMFB_SRV_FLAG_PING) ? SILENCE_TIMEOUT : -1;
     uint64_t batch_t0 = 0;           /* 0 = no unpublished rect */
+#ifdef SREMFB_VIEW_H264
+    struct h264_conn hc = {0};
+#endif
 
     if (!scratch || !pixels || (!n->o.no_lz4 && !comp)) {
         view_log("out of memory");
@@ -537,8 +756,24 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
             continue;
         }
 
+#ifdef SREMFB_VIEW_H264
+        if (n->h264_offered && hd.encoding == SREMFB_ENC_H264) {
+            if (h264_au(n, &hc, &hd, scratch, w, h, timeout) < 0)
+                break;
+            continue;
+        }
+        if (n->h264_offered && hd.encoding == SREMFB_ENC_H264_EOS) {
+            if (hd.payload_len != 0) {
+                view_log("bad H264_EOS payload len %u", hd.payload_len);
+                break;
+            }
+            if (h264_eos(n, &hc, scratch, w, h) < 0)
+                break;
+            continue;
+        }
+#endif
         if (hd.encoding != SREMFB_ENC_RAW && hd.encoding != SREMFB_ENC_LZ4) {
-            /* H.264 is never negotiated: anything else is a protocol
+            /* H.264 not negotiated, or something else: a protocol
              * error (or a newer server we don't understand) */
             view_log("unsupported encoding %u, dropping connection",
                      hd.encoding);
@@ -595,6 +830,11 @@ static void stream_loop(struct view_net *n, unsigned w, unsigned h)
     }
 
     view_audio_stop(audio);
+#ifdef SREMFB_VIEW_H264
+    view_h264_close(hc.dec);
+    free(hc.aubuf);
+    atomic_store(&n->st->h264_active, 0);
+#endif
     pthread_mutex_lock(&n->wlock);
     n->fd = -1;
     pthread_mutex_unlock(&n->wlock);
