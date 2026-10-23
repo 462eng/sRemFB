@@ -42,17 +42,19 @@ main-evdi.o: CFLAGS += -DSREMFB_VERSION='"$(VERSION)"'
 # sysroot croisé), et CC, CFLAGS, LDFLAGS, PKG_CONFIG se surchargent depuis
 # la ligne de commande sans perdre les -I (KVM_CFLAGS est interne).
 #
-#   make sremfb-kvm                 encodeur x264 (core/encoder.c) : le
-#                                   défaut tant que le lot C n'a pas livré
-#   make sremfb-kvm ENCODER=v4l2    encodeur matériel kvm/encoder_v4l2.c
-#                                   (lot C) — échoue tant que le fichier
-#                                   n'existe pas
+#   make sremfb-kvm                 encodeur matériel kvm/encoder_v4l2.c
+#                                   (bcm2835-codec, /dev/video11) : le
+#                                   défaut. Ne demande que les en-têtes
+#                                   linux/videodev2.h ; sans le device
+#                                   (PC), le serveur reste en RAW/LZ4
+#   make sremfb-kvm ENCODER=x264    encodeur x264 (core/encoder.c) : dev PC,
+#                                   valide le chemin H.264 sans Pi
 #   make sremfb-kvm KVM_STATIC=1    glib, pcre2, lz4 liés en statique, la
 #                                   libc (et libm, pthread) en dynamique :
 #                                   le feuillet millefeuille
 #   make check-kvm                  tests unitaires diff.c / convert_uyvy.c
 PKG_CONFIG ?= pkg-config
-ENCODER    ?= x264
+ENCODER    ?= v4l2
 
 KVM_PKGS   = glib-2.0 liblz4
 KVM_CORE   = core/net.kvm.o core/convert.kvm.o core/control.kvm.o \
@@ -92,6 +94,13 @@ KVM_LIBS  += $(if $(KVM_ENC_PKGS),$(shell $(PKG_CONFIG) --libs $(KVM_ENC_PKGS)))
 
 kvm/convert_uyvy.kvm.o: KVM_CFLAGS += -ftree-vectorize
 main-kvm.kvm.o: KVM_CFLAGS += -DSREMFB_VERSION='"$(VERSION)"'
+# --probe nomme l'encodeur lié ; le témoin recompile capture.c quand
+# ENCODER change d'une construction à l'autre
+kvm/capture.kvm.o: KVM_CFLAGS += -DSREMFB_KVM_ENC='"$(ENCODER)"'
+kvm/capture.kvm.o: kvm/.encoder-$(ENCODER)
+kvm/.encoder-$(ENCODER):
+	rm -f kvm/.encoder-*
+	touch $@
 
 sremfb-kvm: $(KVM_CORE) $(KVM_ENC) $(KVM_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(KVM_LIBS)
@@ -103,14 +112,12 @@ kvm/test-kvm: $(KVM_TEST_OBJS)
 check-kvm: kvm/test-kvm
 	./kvm/test-kvm
 
-# source explicite : ENCODER=v4l2 sans kvm/encoder_v4l2.c (lot C) échoue
-# avec « aucune règle pour fabriquer kvm/encoder_v4l2.c »
 $(KVM_ENC): $(KVM_ENC:.kvm.o=.c)
 $(KVM_CORE) $(KVM_ENC) $(KVM_OBJS) $(KVM_TEST_OBJS): core/core.h \
 	core/source.h ../protocol.h kvm/kvm.h
 
 clean:
 	rm -f sremfb-server sremfb-latency-click rfb-server *.o core/*.o evdi/*.o
-	rm -f sremfb-kvm kvm/test-kvm kvm/*.o
+	rm -f sremfb-kvm kvm/test-kvm kvm/*.o kvm/.encoder-*
 
 .PHONY: all clean check-kvm
