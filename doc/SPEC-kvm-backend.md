@@ -17,9 +17,9 @@ de la spec d'origine ; les renvois vers §7–§14 pointent dans ce document-là
   croisé sans gio/pipewire/libevdi construit `sremfb-kvm`, et `CC`,
   `CFLAGS`, `LDFLAGS`, `PKG_CONFIG` se surchargent sans perdre les `-I`.
   `sremfb-server` est construit à l'identique.
-- **`ENCODER` vaut `x264` par défaut** tant que `kvm/encoder_v4l2.c`
-  (lot C) n'existe pas ; `ENCODER=v4l2` échoue d'ici là. `kvm/hidmap.c`
-  (lot B) est pris dans `KVM_OBJS` dès qu'il existe.
+- `ENCODER` valait `x264` par défaut tant que `kvm/encoder_v4l2.c`
+  n'existait pas ; depuis le lot C, **`ENCODER=v4l2` est le défaut**, comme
+  au §4.1. `kvm/hidmap.c` (lot B) est pris dans `KVM_OBJS` dès qu'il existe.
 - `KVM_STATIC=1` : `-Wl,-Bstatic $(pkg-config --static --libs glib-2.0
   liblz4) -Wl,-Bdynamic`, en sortant de la partie statique `-lm`,
   `-pthread`, `-ldl`, `-lrt`, `-lc` (libc et libm restent dynamiques).
@@ -417,6 +417,94 @@ au matériel.
 - Build dev PC : `make sremfb-kvm ENCODER=x264` relie `core/encoder.o` à la
   place ; le mode test §4.9 permet alors de valider tout le chemin H.264 avec
   `sremfb-view` sans Pi.
+
+#### Écarts d'implémentation (lot C, branche `kvm-encoder`)
+
+Implémentation écrite d'après le source du driver (`bcm2835-v4l2-codec.c`,
+`rpi-6.12.y`) et validée contre un faux driver seulement : **rien n'a tourné
+sur un Pi** (voir la liste « à valider » plus bas).
+
+- **Ordre des ioctls** : S_FMT CAPTURE (H264) puis S_FMT OUTPUT (YUV420),
+  S_PARM, REQBUFS CAPTURE puis OUTPUT, **contrôles après REQBUFS** : le
+  driver ne crée le composant MMAL qu'au premier REQBUFS et ne pousse les
+  contrôles au firmware qu'une fois celui-ci créé ; posés avant, ils seraient
+  appliqués sans retour d'erreur (`v4l2_ctrl_handler_setup`). Puis
+  QUERYBUF/mmap, QBUF de tous les CAPTURE, STREAMON OUTPUT et CAPTURE.
+- **Géométrie OUTPUT relue** : en encode, le driver arrondit `bytesperline`
+  à 64 (1366 → 1408) et ne touche pas la hauteur ; la frame est copiée ligne
+  à ligne quand le stride diffère, U à `bpl × hauteur`, V à
+  `U + bpl/2 × hauteur/2`, un seul plan mémoire (`num_planes = 1`). Largeur
+  rabotée par le driver (> 1920 ou < 32) ou dimensions impaires → l'ouverture
+  échoue (x264 refuse aussi l'impair en 4:2:0) et le client reste en RAW.
+- **Level 4.2** (repli 4.1 puis 4.0), profil High (repli Main puis
+  Constrained Baseline) : 4.0 ne couvre que 1080p30, alors que la capture va
+  jusqu'à 1080p50 et que x264 annonce déjà 4.2 (fps 60). S_PARM = 60 i/s,
+  comme x264 (le débit par frame du contrôle de débit en dépend).
+- **CAPTURE** : 4 buffers de `max(1 Mio, w × h)` (2 Mio en 1080p, au lieu
+  des 768 Kio par défaut du driver ; le driver accepte une `sizeimage` plus
+  grande sur un format compressé). Une AU qui déborde arrive en plusieurs
+  buffers de même timestamp : elle est recollée dans un tampon à part (AU
+  complète = une tranche vue et un buffer pas plein ; 50 ms de grâce si le
+  dernier buffer était plein). Tout buffer d'un autre timestamp est rendu
+  au driver sans être lu (reliquat d'une frame abandonnée, ou le buffer de
+  rebut à timestamp nul que le firmware peut sortir en premier — constaté
+  par ustreamer), sauf s'il ne contient que des en-têtes (SEI/SPS/PPS/AUD),
+  au cas où le firmware les sortirait à part sans recopier le pts.
+- **`is_idr`** = `V4L2_BUF_FLAG_KEYFRAME` **ou** une NAL de type 5 dans l'AU.
+  `force_idr` qui ne donne pas d'IDR (ou `FORCE_KEY_FRAME` refusé) → `-1` :
+  un épisode ouvert sur une P serait prédit d'une image périmée côté client,
+  le RAW est préférable. `FORCE_KEY_FRAME` est aussi envoyé pour la première
+  frame (inoffensif).
+- **Comparaison** (lecture seule, aucun code repris) : ustreamer
+  (`src/ustreamer/m2m.c`, PiKVM) suit la même séquence (contrôles par
+  S_CTRL, S_FMT des deux files, S_PARM, REQBUFS/mmap/QBUF, STREAMON,
+  `FORCE_KEY_FRAME` avant QBUF, poll POLLIN, appariement par timestamp,
+  `sizeimage` CAPTURE agrandie à 1,5 Mio pour les grosses IDR, level 4.2
+  pour 1080p au-delà de 30 i/s). Différences : il pose les contrôles avant
+  S_FMT (même effet, sans retour d'erreur), borne les QP à 16–32 (ici les
+  défauts du driver, 20–51 : réglage à reprendre sur Pi si le texte bave)
+  et garde une IDR périodique (GOP), que le cœur sRemFB ne veut pas.
+- **Timeouts** : 200 ms par frame, **1 s pour la première** (démarrage du
+  composant). Timeout, `V4L2_BUF_FLAG_ERROR`, `LAST` ou erreur d'ioctl → `-1`,
+  le cœur repasse en RAW pour ce client (`h264_failed`).
+- **Débit** : borné à 25–25 000 kb/s ; `sremfb_enc_bitrate()` renvoie la
+  valeur effective (bornée), si bien que l'AIMD de `control.c` plafonne à
+  25 000 sans erreur. Pas de VBV réglable : une IDR n'est pas limitée aux
+  ~100 ms de débit que garantit x264.
+- **Device** : `SREMFB_KVM_ENCODER` lu par l'encodeur lui-même (défaut
+  `/dev/video11`) ; l'ouverture vérifie M2M_MPLANE et la présence de
+  YUV420 → H264 (mauvais nœud → message explicite). Sans device (PC), chaque
+  client qui ouvre un épisode H.264 essaie une fois, échoue avec un
+  avertissement clair, et reste en RAW/LZ4 ; le serveur continue (le cœur
+  journalise ensuite « x264 init failed, staying raw », libellé de
+  `core/xmit.c` laissé tel quel).
+- **`--probe`** : après le rapport du device, un **essai d'encodage réel**
+  1080p par l'API du cœur (IDR, P, IDR forcée, débit 40 000 demandé) avec
+  tailles, `is_idr` et durée ; avec `ENCODER=x264`, seul l'essai est fait.
+  Le Makefile passe `-DSREMFB_KVM_ENC` à `capture.c` (témoin
+  `kvm/.encoder-*` pour recompiler quand `ENCODER` change).
+- `kvm.h` inchangé.
+
+À valider sur Pi (le faux driver ne le prouve pas) :
+
+1. Disposition mémoire YUV420 réellement lue par le firmware en 1080
+   lignes (hauteur non multiple de 16) et avec un stride arrondi (1366×768,
+   1600×900) : U à `bpl × 1080` ? Sinon chroma décalée → passer par
+   `ALIGN(h, 16)` + sélection CROP.
+2. `FORCE_KEY_FRAME` appliqué **à la frame qui suit** (pas une frame plus
+   tard) ; sinon chaque épisode retombe en RAW (« IDR demandée, frame
+   non-IDR reçue »).
+3. SPS/PPS dans le même buffer que l'IDR (HEADER_MODE + REPEAT_SEQ_HEADER),
+   première frame IDR, KEYFRAME posé.
+4. `H264_I_PERIOD = 0x7FFFFFFF` sans IDR périodique ni effet de bord du
+   firmware (repli : 0 = « une IDR initiale puis que des P » selon raspivid).
+5. Level 4.2 accepté par le firmware ; CBR réellement suivi, `BITRATE`
+   modifiable en streaming ; taille des IDR 1080p d'un bureau chargé à
+   25 Mb/s (< 2 Mio ?).
+6. Latence d'encodage 1080p (attendu 10–30 ms), délais 200 ms / 1 s
+   suffisants ; CMA disponible pour 2×3 Mo + 4×2 Mio en plus de la capture.
+7. VUI écrit par le firmware (le protocole impose BT.601 limited de toute
+   façon) ; décodage du flux par `sremfb-view` et par le décodeur SBC.
 
 ### 4.7 `input_hid.c` + `hidmap.c` — entrées vers la cible
 

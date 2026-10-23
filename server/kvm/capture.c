@@ -27,6 +27,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -45,6 +46,10 @@
 #define KVM_DEBOUNCE_US 300000      /* au plus un restream / 300 ms */
 #define KVM_POLL_MS     1000        /* QUERY_DV_TIMINGS tant que sans signal */
 #define KVM_STATS_S     10
+
+#ifndef SREMFB_KVM_ENC
+#define SREMFB_KVM_ENC  "?"         /* nom de l'encodeur lié (Makefile) */
+#endif
 
 /* Mode détecté par probe_signal(). */
 typedef struct {
@@ -1119,10 +1124,59 @@ static gboolean probe_encoder(const char *dev)
     probe_ctrl(fd, V4L2_CID_MPEG_VIDEO_REPEAT_SEQ_HEADER, "REPEAT_SEQ_HEADER");
     probe_ctrl(fd, V4L2_CID_MPEG_VIDEO_HEADER_MODE, "HEADER_MODE");
     probe_ctrl(fd, V4L2_CID_MPEG_VIDEO_H264_I_PERIOD, "H264_I_PERIOD");
+    probe_ctrl(fd, V4L2_CID_MPEG_VIDEO_GOP_SIZE, "GOP_SIZE");
     probe_ctrl(fd, V4L2_CID_MPEG_VIDEO_B_FRAMES, "B_FRAMES");
     probe_ctrl(fd, V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME, "FORCE_KEY_FRAME");
     close(fd);
     return m2m;
+}
+
+/* Essai réel de l'encodeur lié, par l'API du cœur : une IDR, une P, une
+ * IDR forcée, puis un débit hors bornes. */
+static gboolean probe_encode(const char *dev)
+{
+    enum { W = 1920, H = 1080 };
+    size_t luma = (size_t)W * H, chroma = luma / 4;
+    struct SremfbEncoder *enc;
+    gboolean ok = TRUE;
+    uint8_t *yuv;
+
+    if (dev && *dev)
+        setenv("SREMFB_KVM_ENCODER", dev, 1);
+    g_print("  essai d'encodage (encodeur %s) : %dx%d, 8000 kb/s\n",
+            SREMFB_KVM_ENC, W, H);
+    enc = sremfb_enc_open(W, H, 8000);
+    if (!enc) {
+        g_print("    ouverture : ÉCHEC (voir ci-dessus)\n");
+        return FALSE;
+    }
+    yuv = g_malloc(luma + 2 * chroma);
+    for (int f = 0; f < 3; f++) {
+        static const int want_idr[3] = { 1, 0, 1 };
+        uint8_t *nal = NULL;
+        int idr = 0;
+        /* mire en dégradé qui glisse : du vrai travail pour les P */
+        for (size_t i = 0; i < luma; i++)
+            yuv[i] = (uint8_t)(16 + ((i % W + i / W + (size_t)f * 8) % 220));
+        memset(yuv + luma, 128, 2 * chroma);
+        gint64 t0 = g_get_monotonic_time();
+        int sz = sremfb_enc_encode(enc, yuv, yuv + luma, yuv + luma + chroma,
+                                   want_idr[f], &nal, &idr);
+        gint64 dt = g_get_monotonic_time() - t0;
+        gboolean good = sz > 0 && nal && idr == want_idr[f];
+        g_print("    frame %d (%s demandée) : %d octets, %s, %.1f ms%s\n", f,
+                want_idr[f] ? "IDR" : "P", sz, idr ? "IDR" : "non-IDR",
+                dt / 1000.0, good ? "" : "  ÉCHEC");
+        ok = ok && good;
+        if (sz < 0)
+            break;
+    }
+    sremfb_enc_set_bitrate(enc, 40000);
+    g_print("    débit demandé 40000 kb/s -> %d kb/s retenus\n",
+            sremfb_enc_bitrate(enc));
+    sremfb_enc_close(enc);
+    g_free(yuv);
+    return ok;
 }
 
 int sremfb_kvm_probe(SremfbKvmState *st, const char *encoder,
@@ -1134,7 +1188,10 @@ int sremfb_kvm_probe(SremfbKvmState *st, const char *encoder,
     st->fd = -1;
     st->prev = -1;
     cap_ok = probe_capture(st);
-    enc_ok = probe_encoder(encoder);
+    /* x264 (dev PC) : pas de device à inspecter, seulement l'essai */
+    enc_ok = g_strcmp0(SREMFB_KVM_ENC, "x264") == 0 || probe_encoder(encoder);
+    if (enc_ok)
+        enc_ok = probe_encode(encoder);
     for (int i = 0; i < 3; i++) {
         if (!hid[i] || !*hid[i]) {
             g_print("HID %s : désactivé (variable vide)\n", hid_name[i]);
