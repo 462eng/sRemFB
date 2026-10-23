@@ -50,7 +50,8 @@ main-evdi.o: CFLAGS += -DSREMFB_VERSION='"$(VERSION)"'
 #   make sremfb-kvm KVM_STATIC=1    glib, pcre2, lz4 liés en statique, la
 #                                   libc (et libm, pthread) en dynamique :
 #                                   le feuillet millefeuille
-#   make check-kvm                  tests unitaires diff.c / convert_uyvy.c
+#   make check-kvm                  tests unitaires diff.c / convert_uyvy.c /
+#                                   hidmap.c / rapports HID
 PKG_CONFIG ?= pkg-config
 ENCODER    ?= x264
 
@@ -60,7 +61,7 @@ KVM_CORE   = core/net.kvm.o core/convert.kvm.o core/control.kvm.o \
 KVM_OBJS   = kvm/capture.kvm.o kvm/diff.kvm.o kvm/convert_uyvy.kvm.o \
              kvm/input_hid.kvm.o kvm/stubs.kvm.o kvm/testsrc.kvm.o \
              main-kvm.kvm.o
-# hidmap.c (lot B) est pris dès qu'il existe
+# hidmap.c (lot B, généré par kvm/gen-hidmap.py) est pris dès qu'il existe
 KVM_OBJS  += $(patsubst %.c,%.kvm.o,$(wildcard kvm/hidmap.c))
 ifeq ($(ENCODER),x264)
 KVM_ENC    = core/encoder.kvm.o
@@ -96,7 +97,8 @@ main-kvm.kvm.o: KVM_CFLAGS += -DSREMFB_VERSION='"$(VERSION)"'
 sremfb-kvm: $(KVM_CORE) $(KVM_ENC) $(KVM_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(KVM_LIBS)
 
-KVM_TEST_OBJS = kvm/test-kvm.kvm.o kvm/diff.kvm.o kvm/convert_uyvy.kvm.o
+KVM_TEST_OBJS = kvm/test-kvm.kvm.o kvm/diff.kvm.o kvm/convert_uyvy.kvm.o \
+                kvm/input_hid.kvm.o kvm/hidmap.kvm.o
 kvm/test-kvm: $(KVM_TEST_OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^ $(shell $(PKG_CONFIG) --libs glib-2.0) -lm
 

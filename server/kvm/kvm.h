@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
+#include <linux/input-event-codes.h>
+
 #include "core.h"
 
 /* Buffers V4L2 de capture (§4.3.2) : 1 retenu comme frame précédente,
@@ -139,5 +141,50 @@ gboolean sremfb_kvm_test_query(struct sremfb_kvm_testsrc *t, int *w, int *h,
 /* buffers UYVY dans st->buf[], timer à la cadence ; FALSE = échec */
 gboolean sremfb_kvm_test_start(struct sremfb_kvm_testsrc *t);
 void     sremfb_kvm_test_stop(struct sremfb_kvm_testsrc *t);
+
+/* --- ajout lot B : encodage des rapports HID (input_hid.c, hidmap.c) ---
+ * Fonctions pures, sans fd ni client : testées par test-kvm.c. */
+
+/* hidmap.c (généré par gen-hidmap.py) : evdev KEY_* -> usage HID de la
+ * page Keyboard (0x07) ; 0 = pas d'usage. 0xE0..0xE7 = modificateurs. */
+extern const uint8_t sremfb_hid_usage[KEY_CNT];
+
+/* Usage maximal du descripteur clavier boot (§5.1 : Usage/Logical Maximum
+ * 0x65) ; au-delà, l'hôte ignorerait le code. */
+#define SREMFB_HID_KBD_USAGE_MAX 0x65
+
+/* Clavier boot protocol : [modificateurs][0][k1..k6]. */
+struct sremfb_hid_kbd {
+    uint8_t mods;              /* bits 0..7 : LCTRL LSHIFT LALT LMETA
+                                  RCTRL RSHIFT RALT RMETA */
+    uint8_t keys[6];           /* usages enfoncés, dans l'ordre d'appui */
+    uint8_t down[KEY_CNT / 8]; /* codes evdev enfoncés (et rapportés) */
+};
+enum {
+    SREMFB_HID_KEY_SAME     = 0,   /* rien ne change (double appui, repeat) */
+    SREMFB_HID_KEY_CHANGED  = 1,   /* le rapport a changé */
+    SREMFB_HID_KEY_NOUSAGE  = -1,  /* pas d'usage HID (ou hors descripteur) */
+    SREMFB_HID_KEY_ROLLOVER = -2,  /* 6 touches déjà enfoncées : ignorée */
+};
+/* EV_KEY code/value (1 appui, 0 relâchement, 2 repeat ignoré). */
+int  sremfb_hid_kbd_key(struct sremfb_hid_kbd *k, unsigned code, int value);
+gboolean sremfb_hid_kbd_held(const struct sremfb_hid_kbd *k, unsigned code);
+void sremfb_hid_kbd_report(const struct sremfb_hid_kbd *k, uint8_t out[8]);
+
+/* Souris relative (5 octets) et pointeur absolu (7 octets) : boutons et
+ * mouvements accumulés jusqu'au SYN_REPORT. */
+struct sremfb_hid_mouse {
+    uint8_t buttons;           /* bits 0..4 : LEFT RIGHT MIDDLE SIDE EXTRA */
+    int dx, dy, wheel, hwheel; /* accumulateurs (relatif) */
+};
+/* BTN_LEFT..BTN_EXTRA -> bit 0..4 ; -1 pour un autre code. */
+int  sremfb_hid_button_bit(unsigned code);
+/* [boutons][dx][dy][wheel][hwheel] : consomme au plus ±127 de chaque
+ * accumulateur ; renvoie TRUE tant qu'il en reste (rapport suivant). */
+gboolean sremfb_hid_mouse_report(struct sremfb_hid_mouse *m, uint8_t out[5]);
+/* [boutons][X u16 LE][Y u16 LE][wheel][hwheel], hx/hy en 0..32767 ;
+ * molettes consommées comme ci-dessus. */
+gboolean sremfb_hid_pointer_report(struct sremfb_hid_mouse *m, int hx, int hy,
+                                   uint8_t out[7]);
 
 #endif /* SREMFB_KVM_H */
