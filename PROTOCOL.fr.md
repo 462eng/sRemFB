@@ -394,3 +394,8 @@ Le serveur les attache (vhci-hcd) tant que le client streame et les
 détache à sa déconnexion — la même vivacité de 6 s qui débranche
 l'écran virtuel libère aussi les périphériques USB. Tout passe par le
 protocole usbip standard ; sRemFB n'orchestre que le cycle de vie.
+Exception : tant que le serveur attend un compositeur en veille d'écran
+(voir `SERVER_FAIL`), il annonce les périphériques avant son hello, pour
+que le clavier du client puisse réveiller la session ; le PING n'est pas
+encore négocié, et les périphériques sont libérés à la perte de la
+connexion TCP (HUP, keepalive TCP).

@@ -78,16 +78,23 @@ typedef struct {
  * mutter's DisplayConfig.PowerSaveMode (0 on, 1-3 standby/suspend/off,
  * < 0 unknown); ps_seen when a tick last saw power save, 0 = never during
  * this wait. A session that just woke up gets SREMFB_PS_GRACE_US to
- * modeset before its silence counts as a failure again. */
+ * modeset before its silence counts as a failure again; if mutter cannot
+ * even be read right after a power save (busy replaying its modesets),
+ * the grace stretches to SREMFB_PS_UNKNOWN_GRACE_US. The grace counts
+ * from the last tick that saw power save, so it is 10-20 s (resp.
+ * 50-60 s) after the actual wake-up. */
 enum { SREMFB_MODE_WAIT_FAIL = 0, SREMFB_MODE_WAIT_PARK };
-#define SREMFB_PS_GRACE_US  ((gint64)15 * G_USEC_PER_SEC)
+#define SREMFB_PS_GRACE_US          ((gint64)15 * G_USEC_PER_SEC)
+#define SREMFB_PS_UNKNOWN_GRACE_US  ((gint64)60 * G_USEC_PER_SEC)
 
 static inline int sremfb_mode_wait_verdict(int power_save, gint64 now,
                                            gint64 ps_seen)
 {
     if (power_save > 0)
         return SREMFB_MODE_WAIT_PARK;
-    if (ps_seen > 0 && now - ps_seen < SREMFB_PS_GRACE_US)
+    if (ps_seen > 0 && now - ps_seen < (power_save < 0
+                                        ? SREMFB_PS_UNKNOWN_GRACE_US
+                                        : SREMFB_PS_GRACE_US))
         return SREMFB_MODE_WAIT_PARK;
     return SREMFB_MODE_WAIT_FAIL;
 }

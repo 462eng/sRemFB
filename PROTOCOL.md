@@ -380,3 +380,8 @@ server attaches those devices (vhci-hcd) while the client is streaming
 and detaches them when it disconnects — the same 6 s liveness that
 unplugs the virtual monitor also releases the USB devices. Everything
 uses the stock usbip protocol; sRemFB only orchestrates the lifecycle.
+Exception: while the server waits for a compositor in power save (see
+`SERVER_FAIL`), it announces the devices before its hello, so the
+client's keyboard can wake the session; PING is not negotiated yet, and
+the devices are released when the TCP connection is lost (HUP, TCP
+keepalive).

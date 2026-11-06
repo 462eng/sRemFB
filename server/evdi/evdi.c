@@ -1049,8 +1049,9 @@ static gboolean on_mode_timeout(gpointer data)
         SREMFB_MODE_WAIT_PARK) {
         if (!EV(c)->usb_early) {
             g_message("[%s] compositor in power save (mode %d): connector "
-                      "kept plugged until the session wakes up", c->macstr,
-                      ps);
+                      "kept plugged until the session wakes up%s", c->macstr,
+                      ps, c->usb_cap ? "" : " (client has no USB: only a "
+                      "local input on this machine can wake it)");
             sremfb_usb_peer_add(c);    /* its keyboard can wake it */
             EV(c)->usb_early = TRUE;
         }

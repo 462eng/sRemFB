@@ -184,7 +184,8 @@ struct SremfbServer {
 /* session.c — source-agnostic client lifecycle */
 void sremfb_client_lost(SremfbClient *c);
 void sremfb_schedule_client_lost(SremfbClient *c);
-void sremfb_usb_peer_add(SremfbClient *c);     /* streaming + usb_cap */
+void sremfb_usb_peer_add(SremfbClient *c);     /* usb_cap; streaming, or
+                                                  parked in power save */
 void sremfb_usb_peer_remove(SremfbClient *c);
 int  sremfb_serve(SremfbServer *srv);          /* listen + run the loop */
 
