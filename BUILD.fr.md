@@ -143,7 +143,7 @@ cibles d'installation.
 | `sremfb-view` | amd64 | PC Linux (visionneuse fenêtrée SDL3) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.5.0 par défaut
+./pkg/build-debs.sh              # version 1.5.2 par défaut
 ./pkg/build-debs.sh 3.1.0        # version explicite
 ```
 
@@ -190,11 +190,11 @@ surchargez-le via la variable d'environnement `MAINT`
 
 ```sh
 # serveur
-sudo apt install ./dist/sremfb-server_1.5.0_amd64.deb
+sudo apt install ./dist/sremfb-server_1.5.2_amd64.deb
 # client (sur le SBC)
-sudo apt install ./dist/sremfb-client_1.5.0_arm64.deb
+sudo apt install ./dist/sremfb-client_1.5.2_arm64.deb
 # visionneuse (sur un PC de bureau)
-sudo apt install ./dist/sremfb-view_1.5.0_amd64.deb
+sudo apt install ./dist/sremfb-view_1.5.2_amd64.deb
 ```
 
 Sur une conf déjà modifiée, `dpkg -i --force-confold` conserve le fichier

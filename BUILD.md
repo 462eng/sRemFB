@@ -141,7 +141,7 @@ targets.
 | `sremfb-view` | amd64 | Linux PC (SDL3 windowed viewer) |
 
 ```sh
-./pkg/build-debs.sh              # version 1.5.0 by default
+./pkg/build-debs.sh              # version 1.5.2 by default
 ./pkg/build-debs.sh 3.1.0        # explicit version
 ```
 
@@ -186,11 +186,11 @@ override it with the `MAINT` environment variable
 
 ```sh
 # server
-sudo apt install ./dist/sremfb-server_1.5.0_amd64.deb
+sudo apt install ./dist/sremfb-server_1.5.2_amd64.deb
 # client (on the SBC)
-sudo apt install ./dist/sremfb-client_1.5.0_arm64.deb
+sudo apt install ./dist/sremfb-client_1.5.2_arm64.deb
 # viewer (on a desktop PC)
-sudo apt install ./dist/sremfb-view_1.5.0_amd64.deb
+sudo apt install ./dist/sremfb-view_1.5.2_amd64.deb
 ```
 
 On an already-modified config, `dpkg -i --force-confold` keeps the

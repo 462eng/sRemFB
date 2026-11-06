@@ -19,7 +19,7 @@
 # (dpkg-shlibdeps) pour la visionneuse. VIEW_H264=0 construit la
 # visionneuse sans H.264 (ni libavcodec).
 
-VERSION=${1:-1.5.0}
+VERSION=${1:-1.5.2}
 MAINT=${MAINT:-"Jonathan Roth <jr@462eng.fr>"}
 TOP=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 DIST=$TOP/dist
