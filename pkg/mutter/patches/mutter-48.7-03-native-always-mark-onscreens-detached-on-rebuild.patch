@@ -1,0 +1,86 @@
+From a13f465e69341f8c1699688c2f8d06e9f2b02c5a Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20=C3=85dahl?= <jadahl@gmail.com>
+Date: Sat, 12 Sep 2026 21:28:55 +0200
+Subject: [PATCH] renderer/native: Always mark onscreens as detached when
+ rebuilding views
+
+When rebuilding the views, the views may get freed, meaning if we don't
+mark them as detached (unset the view, disconnect signals), they will
+still react to e.g. gamma changes, or privacy screen changes etc, where
+the handles will try to interact with the now potentially freed view.
+
+For this to happen, the onscreen must be kept alive longer than the
+view; this may happen when a hotplug happens while in power save mode,
+which will queue a symbolic power save page flip. If something triggers
+one of the signals an onscreen listens on before the power save page
+flip frees the onscreen, we'll hit the crash.
+
+The added test case triggered this by changing the CRTC gamma before
+leaving power save mode.
+
+An example backtrace:
+
+    #0  clutter_stage_view_schedule_update ()
+    ...
+    #5  g_signal_emit ()
+    #6  meta_crtc_kms_set_gamma_lut ()
+    #7  meta_crtc_set_gamma_lut ()
+    #8  set_gamma_lut ()
+    #9  meta_monitor_mode_foreach_crtc ()
+    #10 meta_monitor_set_gamma_lut ()
+    #11 update_white_point ()
+    #12 do_update ()
+    #13 in meta_color_device_update ()
+    #14 update_device_properties ()
+    #15 in meta_color_manager_monitors_changed ()
+    #16 ensure_monitor_color_devices ()
+    #17 meta_monitor_manager_notify_monitors_changed ()
+    ...
+    #34 g_main_loop_run ()
+    #35 meta_context_run_main_loop ()
+
+Closes: https://gitlab.gnome.org/GNOME/mutter/-/work_items/5042
+Part-of: <https://gitlab.gnome.org/GNOME/mutter/-/merge_requests/5324>
+(cherry picked from commit 8e3870f45792836291fee329ed897da2d6a07c54)
+Origin: backport, https://gitlab.gnome.org/GNOME/mutter/-/commit/a13f465e69341f8c1699688c2f8d06e9f2b02c5a
+Bug: https://gitlab.gnome.org/GNOME/mutter/-/work_items/4101
+Bug: https://gitlab.gnome.org/GNOME/mutter/-/work_items/5008
+Applied-Upstream: gnome-49 (absent de gnome-48 au 2026-11-06)
+Last-Update: 2026-11-06
+Note: seul le changement du renderer est rétroporté ; le cas de test
+ (src/tests/native-kms-device.c) et les META_EXPORT_TEST sont omis, les
+ en-têtes et utilitaires de test de 48.7 diffèrent.
+---
+ src/backends/meta-monitor-manager-private.h |  1 +
+ src/backends/meta-monitor-private.h         |  1 +
+ src/backends/native/meta-renderer-native.c  | 11 ++---
+ src/tests/native-kms-device.c               | 46 +++++++++++++++++++++
+ 4 files changed, 54 insertions(+), 5 deletions(-)
+
+--- a/src/backends/native/meta-renderer-native.c
++++ b/src/backends/native/meta-renderer-native.c
+@@ -1600,8 +1600,6 @@ maybe_detach_onscreens (MetaRenderer *re
+   GList *l;
+ 
+   power_save_mode = meta_monitor_manager_get_power_save_mode (monitor_manager);
+-  if (power_save_mode != META_POWER_SAVE_ON)
+-    return;
+ 
+   views = meta_renderer_get_views (renderer);
+   for (l = views; l; l = l->next)
+@@ -1614,9 +1612,12 @@ maybe_detach_onscreens (MetaRenderer *re
+ 
+       meta_onscreen_native_detach (META_ONSCREEN_NATIVE (onscreen));
+ 
+-      renderer_native->detached_onscreens =
+-        g_list_prepend (renderer_native->detached_onscreens,
+-                        g_object_ref (onscreen));
++      if (power_save_mode == META_POWER_SAVE_ON)
++        {
++          renderer_native->detached_onscreens =
++            g_list_prepend (renderer_native->detached_onscreens,
++                            g_object_ref (onscreen));
++        }
+     }
+ }
+ 

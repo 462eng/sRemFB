@@ -1,0 +1,607 @@
+From: Jonathan Roth <jr@462eng.fr>
+Date: Mon, 28 Sep 2026 18:30:00 +0200
+Subject: native: Forget hot-unplugged secondary GPUs
+
+MetaBackendNative only listened to udev "add" events: when a secondary
+DRM device went away, MetaKms merely re-probed it (failing with "Failed
+to reopen") and the MetaGpuKms / MetaKmsDevice stayed around forever.
+This had two consequences:
+
+ * the kernel may hand the same /dev/dri/cardN to a new device, which is
+   then rejected by on_udev_device_added() ("device already present"),
+   while the stale MetaKmsImplDevice may even reopen the new node by
+   path;
+ * the DRM lease manager never saw the device go away, so the
+   wp_drm_lease_device_v1 global was never removed and Xwayland kept the
+   DRM fd it received through the drm_fd event. That fd keeps the
+   removed drm_device alive, its minor is never freed, and every
+   hotplug cycle (e.g. DisplayLink/evdi) consumes a new cardN until the
+   64 primary minors are exhausted.
+
+On udev "remove" of a non-primary GPU's node, remove the GPU from the
+backend, remove its MetaKmsDevice from MetaKms (closing it and marking
+it so it never reopens its path), let the DRM lease manager withdraw
+the device from Wayland clients through a new MetaKms::device-removed
+signal, and drop the remaining references once the renderer no longer
+uses the GPU.
+
+Bug: https://gitlab.gnome.org/GNOME/mutter/-/issues/710
+Forwarded: no
+Last-Update: 2026-09-28
+
+Index: mutter-48.7/src/backends/meta-backend-private.h
+===================================================================
+--- mutter-48.7.orig/src/backends/meta-backend-private.h
++++ mutter-48.7/src/backends/meta-backend-private.h
+@@ -233,6 +233,9 @@ META_EXPORT_TEST
+ void meta_backend_add_gpu (MetaBackend *backend,
+                            MetaGpu     *gpu);
+ 
++void meta_backend_remove_gpu (MetaBackend *backend,
++                              MetaGpu     *gpu);
++
+ META_EXPORT_TEST
+ GList * meta_backend_get_gpus (MetaBackend *backend);
+ 
+Index: mutter-48.7/src/backends/meta-backend.c
+===================================================================
+--- mutter-48.7.orig/src/backends/meta-backend.c
++++ mutter-48.7/src/backends/meta-backend.c
+@@ -1952,6 +1952,25 @@ meta_backend_add_gpu (MetaBackend *backe
+   g_signal_emit (backend, signals[GPU_ADDED], 0, gpu);
+ }
+ 
++/*
++ * Drops the backend's reference on @gpu and forgets it. The caller is
++ * expected to keep its own reference for as long as other components
++ * (e.g. the renderer) may still use the GPU.
++ */
++void
++meta_backend_remove_gpu (MetaBackend *backend,
++                         MetaGpu     *gpu)
++{
++  MetaBackendPrivate *priv = meta_backend_get_instance_private (backend);
++  GList *link;
++
++  link = g_list_find (priv->gpus, gpu);
++  g_return_if_fail (link);
++
++  priv->gpus = g_list_delete_link (priv->gpus, link);
++  g_object_unref (gpu);
++}
++
+ GList *
+ meta_backend_get_gpus (MetaBackend *backend)
+ {
+Index: mutter-48.7/src/backends/native/meta-backend-native.c
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-backend-native.c
++++ mutter-48.7/src/backends/native/meta-backend-native.c
+@@ -89,6 +89,10 @@ typedef struct _MetaBackendNativePrivate
+ 
+   GHashTable *startup_render_devices;
+ 
++  /* RemovedGpu: hot-unplugged GPUs waiting for the renderer to let go */
++  GList *removed_gpus;
++  guint release_removed_gpus_id;
++
+   MetaBackendNativeMode mode;
+ 
+ #ifdef HAVE_EGL_DEVICE
+@@ -100,6 +104,21 @@ G_DEFINE_TYPE_WITH_PRIVATE (MetaBackendN
+                             meta_backend_native,
+                             META_TYPE_BACKEND)
+ 
++typedef struct _RemovedGpu
++{
++  MetaGpuKms *gpu_kms;
++  MetaKmsDevice *kms_device;
++} RemovedGpu;
++
++static void
++removed_gpu_free (RemovedGpu *removed_gpu)
++{
++  /* The GPU uses its KMS device, so it must go first. */
++  g_clear_object (&removed_gpu->gpu_kms);
++  g_clear_object (&removed_gpu->kms_device);
++  g_free (removed_gpu);
++}
++
+ static void meta_backend_native_resume (MetaBackend *backend);
+ 
+ static void meta_backend_native_pause (MetaBackend *backend);
+@@ -113,6 +132,9 @@ meta_backend_native_dispose (GObject *ob
+ 
+   G_OBJECT_CLASS (meta_backend_native_parent_class)->dispose (object);
+ 
++  g_clear_handle_id (&priv->release_removed_gpus_id, g_source_remove);
++  g_clear_list (&priv->removed_gpus, (GDestroyNotify) removed_gpu_free);
++
+   g_clear_pointer (&priv->startup_render_devices, g_hash_table_unref);
+   g_clear_object (&priv->kms);
+   g_clear_object (&priv->device_pool);
+@@ -636,6 +658,119 @@ on_udev_device_added (MetaUdev
+ }
+ 
+ static gboolean
++release_removed_gpus (gpointer user_data)
++{
++  MetaBackendNative *native = META_BACKEND_NATIVE (user_data);
++  MetaBackendNativePrivate *priv =
++    meta_backend_native_get_instance_private (native);
++  MetaRenderer *renderer = meta_backend_get_renderer (META_BACKEND (native));
++  GList *l;
++
++  l = priv->removed_gpus;
++  while (l)
++    {
++      RemovedGpu *removed_gpu = l->data;
++      GList *l_next = l->next;
++
++      if (meta_renderer_native_release_gpu (META_RENDERER_NATIVE (renderer),
++                                            removed_gpu->gpu_kms))
++        {
++          meta_topic (META_DEBUG_BACKEND, "Released removed gpu '%s'",
++                      meta_kms_device_get_path (removed_gpu->kms_device));
++          priv->removed_gpus = g_list_delete_link (priv->removed_gpus, l);
++          removed_gpu_free (removed_gpu);
++        }
++
++      l = l_next;
++    }
++
++  if (priv->removed_gpus)
++    return G_SOURCE_CONTINUE;
++
++  priv->release_removed_gpus_id = 0;
++  return G_SOURCE_REMOVE;
++}
++
++static void
++on_udev_device_removed (MetaUdev          *udev,
++                        GUdevDevice       *device,
++                        MetaBackendNative *native)
++{
++  MetaBackendNativePrivate *priv =
++    meta_backend_native_get_instance_private (native);
++  MetaBackend *backend = META_BACKEND (native);
++  MetaMonitorManager *monitor_manager =
++    meta_backend_get_monitor_manager (backend);
++  MetaRenderer *renderer = meta_backend_get_renderer (backend);
++  MetaGpuKms *gpu_kms = NULL;
++  RemovedGpu *removed_gpu;
++  const char *device_path;
++  gboolean had_outputs;
++  GList *l;
++
++  if (g_udev_device_get_device_type (device) != G_UDEV_DEVICE_TYPE_CHAR ||
++      g_strcmp0 (g_udev_device_get_property (device, "DEVTYPE"),
++                 "drm_minor") != 0)
++    return;
++
++  device_path = g_udev_device_get_device_file (device);
++
++  for (l = meta_backend_get_gpus (backend); l; l = l->next)
++    {
++      if (!g_strcmp0 (device_path, meta_gpu_kms_get_file_path (l->data)))
++        {
++          gpu_kms = l->data;
++          break;
++        }
++    }
++
++  if (!gpu_kms)
++    return;
++
++  if (!renderer || !monitor_manager)
++    return;
++
++  if (gpu_kms ==
++      meta_renderer_native_get_primary_gpu (META_RENDERER_NATIVE (renderer)))
++    {
++      g_warning ("Primary gpu '%s' was removed, this is not supported",
++                 device_path);
++      return;
++    }
++
++  g_message ("Removing gpu '%s'", device_path);
++
++  /* MetaKms already handled the removal as a hotplug event (see
++   * on_udev_device_removed() in meta-kms.c, connected before this handler),
++   * so the device has no CRTCs or connectors left and the monitor
++   * configuration no longer uses it. What is left is forgetting the device
++   * so that a new device reusing the same /dev/dri/cardN path is not
++   * rejected as "already present", and so that the DRM fd handed out to
++   * Wayland clients (DRM lease) gets closed. */
++  removed_gpu = g_new0 (RemovedGpu, 1);
++  removed_gpu->gpu_kms = g_object_ref (gpu_kms);
++  removed_gpu->kms_device = g_object_ref (meta_gpu_kms_get_kms_device (gpu_kms));
++
++  had_outputs = meta_gpu_get_outputs (META_GPU (gpu_kms)) != NULL;
++
++  meta_backend_remove_gpu (backend, META_GPU (gpu_kms));
++  meta_kms_remove_device (priv->kms, removed_gpu->kms_device);
++
++  if (had_outputs)
++    meta_monitor_manager_reload (monitor_manager);
++
++  priv->removed_gpus = g_list_append (priv->removed_gpus, removed_gpu);
++
++  /* The renderer may still reference the GPU from onscreens that are being
++   * torn down; release it once they are gone. */
++  if (!priv->release_removed_gpus_id)
++    {
++      priv->release_removed_gpus_id =
++        g_timeout_add_seconds (1, release_removed_gpus, native);
++    }
++}
++
++static gboolean
+ init_gpus (MetaBackendNative  *native,
+            GError            **error)
+ {
+@@ -722,6 +857,11 @@ init_gpus (MetaBackendNative  *native,
+                            G_CALLBACK (on_udev_device_added),
+                            native,
+                            G_CONNECT_DEFAULT);
++  /* Must be connected after MetaKms's own "device-removed" handler. */
++  g_signal_connect_object (udev, "device-removed",
++                           G_CALLBACK (on_udev_device_removed),
++                           native,
++                           G_CONNECT_DEFAULT);
+ 
+   return TRUE;
+ }
+Index: mutter-48.7/src/backends/native/meta-drm-lease.c
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-drm-lease.c
++++ mutter-48.7/src/backends/native/meta-drm-lease.c
+@@ -70,6 +70,7 @@ struct _MetaDrmLeaseManager
+ 
+   gulong resources_changed_handler_id;
+   gulong lease_changed_handler_id;
++  gulong device_removed_handler_id;
+   gulong monitors_changed_handler_id;
+   gulong backend_pause_handler_id;
+   gulong backend_resume_handler_id;
+@@ -905,6 +906,13 @@ meta_drm_lease_manager_constructed (GObj
+     g_signal_connect (kms, "lease-changed",
+                       G_CALLBACK (on_lease_changed),
+                       lease_manager);
++  /* A hot-unplugged device must be withdrawn from clients right away, so
++   * that they close the DRM fd they got from wp_drm_lease_device_v1.drm_fd;
++   * otherwise the kernel never frees the DRM minor. */
++  lease_manager->device_removed_handler_id =
++    g_signal_connect_swapped (kms, "device-removed",
++                              G_CALLBACK (update_resources),
++                              lease_manager);
+   lease_manager->monitors_changed_handler_id =
+     g_signal_connect_swapped (monitor_manager, "monitors-changed-internal",
+                               G_CALLBACK (update_resources),
+@@ -970,6 +978,7 @@ meta_drm_lease_manager_dispose (GObject
+ 
+   g_clear_signal_handler (&lease_manager->resources_changed_handler_id, kms);
+   g_clear_signal_handler (&lease_manager->lease_changed_handler_id, kms);
++  g_clear_signal_handler (&lease_manager->device_removed_handler_id, kms);
+   g_clear_signal_handler (&lease_manager->monitors_changed_handler_id,
+                           monitor_manager);
+   g_clear_signal_handler (&lease_manager->backend_pause_handler_id,
+Index: mutter-48.7/src/backends/native/meta-kms-device-private.h
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-kms-device-private.h
++++ mutter-48.7/src/backends/native/meta-kms-device-private.h
+@@ -27,6 +27,10 @@ MetaKmsResourceChanges meta_kms_device_u
+                                                               uint32_t       crtc_id,
+                                                               uint32_t       connector_id);
+ 
++void meta_kms_device_mark_removed_in_impl (MetaKmsDevice *device);
++
++gboolean meta_kms_device_is_removed (MetaKmsDevice *device);
++
+ MetaKmsCrtc * meta_kms_device_find_crtc_in_impl (MetaKmsDevice *device,
+                                                  uint32_t       crtc_id);
+ 
+Index: mutter-48.7/src/backends/native/meta-kms-device.c
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-kms-device.c
++++ mutter-48.7/src/backends/native/meta-kms-device.c
+@@ -285,6 +285,28 @@ meta_kms_device_update_states_in_impl (M
+   return changes;
+ }
+ 
++void
++meta_kms_device_mark_removed_in_impl (MetaKmsDevice *device)
++{
++  MetaKmsImplDevice *impl_device = meta_kms_device_get_impl_device (device);
++
++  meta_assert_in_kms_impl (device->kms);
++  meta_assert_is_waiting_for_kms_impl_task (device->kms);
++
++  meta_kms_impl_device_mark_removed (impl_device);
++
++  g_clear_pointer (&device->crtcs, g_list_free);
++  g_clear_pointer (&device->connectors, g_list_free);
++  g_clear_pointer (&device->planes, g_list_free);
++}
++
++gboolean
++meta_kms_device_is_removed (MetaKmsDevice *device)
++{
++  return device->impl_device &&
++         meta_kms_impl_device_is_removed (device->impl_device);
++}
++
+ typedef struct
+ {
+   MetaKmsUpdate *update;
+Index: mutter-48.7/src/backends/native/meta-kms-impl-device.c
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-kms-impl-device.c
++++ mutter-48.7/src/backends/native/meta-kms-impl-device.c
+@@ -105,6 +105,7 @@ typedef struct _MetaKmsImplDevicePrivate
+   char *path;
+   MetaKmsDeviceFlag flags;
+   gboolean has_latched_fd_hold;
++  gboolean removed;
+ 
+   char *driver_name;
+   char *driver_description;
+@@ -311,6 +312,15 @@ ensure_device_file (MetaKmsImplDevice  *
+   if (priv->device_file)
+     return TRUE;
+ 
++  /* The device node is gone. Its path may already have been handed out by
++   * the kernel to a completely different device, so never reopen it. */
++  if (priv->removed)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND,
++                   "Device '%s' was removed", priv->path);
++      return FALSE;
++    }
++
+   device_file = meta_kms_impl_device_open_device_file (impl_device,
+                                                        priv->path,
+                                                        error);
+@@ -1247,6 +1257,9 @@ meta_kms_impl_device_open_non_privileged
+ 
+   path = priv->path;
+ 
++  if (priv->removed)
++    return -1;
++
+   fd = open (path, O_RDWR | O_CLOEXEC);
+   if (fd < 0)
+     {
+@@ -2294,6 +2307,11 @@ meta_kms_impl_device_unhold_fd (MetaKmsI
+ 
+   meta_assert_in_kms_impl (kms);
+ 
++  /* A removed device has its fd forcefully closed; late unholds from
++   * updates that were in flight at that time are expected. */
++  if (priv->removed && priv->fd_hold_count == 0)
++    return;
++
+   g_return_if_fail (priv->fd_hold_count > 0);
+ 
+   priv->fd_hold_count--;
+@@ -2451,6 +2469,66 @@ meta_kms_impl_device_resume (MetaKmsImpl
+     priv->deadline_timer_state = META_DEADLINE_TIMER_STATE_ENABLED;
+ }
+ 
++gboolean
++meta_kms_impl_device_is_removed (MetaKmsImplDevice *impl_device)
++{
++  MetaKmsImplDevicePrivate *priv =
++    meta_kms_impl_device_get_instance_private (impl_device);
++
++  return priv->removed;
++}
++
++/*
++ * Called when the DRM device node went away (hot unplug). Drops every
++ * resource tied to the kernel device and makes sure the device is never
++ * reopened by path, since the kernel may reuse the same /dev/dri/cardN for
++ * another device. The object itself stays alive until the last reference is
++ * dropped.
++ */
++void
++meta_kms_impl_device_mark_removed (MetaKmsImplDevice *impl_device)
++{
++  MetaKmsImplDevicePrivate *priv =
++    meta_kms_impl_device_get_instance_private (impl_device);
++
++  meta_assert_in_kms_impl (meta_kms_impl_get_kms (priv->impl));
++
++  if (priv->removed)
++    return;
++
++  priv->removed = TRUE;
++
++  meta_kms_impl_remove_impl_device (priv->impl, impl_device);
++
++  meta_kms_impl_device_discard_pending_page_flips (impl_device);
++  meta_kms_impl_device_prepare_shutdown (impl_device);
++
++  if (priv->realtime_inhibited_pending_mode_set)
++    {
++      MetaThreadImpl *thread_impl = META_THREAD_IMPL (priv->impl);
++      MetaThread *thread = meta_thread_impl_get_thread (thread_impl);
++
++      priv->realtime_inhibited_pending_mode_set = FALSE;
++      meta_thread_uninhibit_realtime_in_impl (thread);
++    }
++
++  g_clear_list (&priv->planes, g_object_unref);
++  g_clear_list (&priv->crtcs, g_object_unref);
++  g_clear_list (&priv->connectors, g_object_unref);
++
++  clear_latched_fd_hold (impl_device);
++
++  if (priv->device_file)
++    {
++      meta_topic (META_DEBUG_KMS,
++                  "Forcefully closing removed device '%s' (%d fd holds)",
++                  priv->path, priv->fd_hold_count);
++      priv->fd_hold_count = 0;
++      g_clear_pointer (&priv->device_file, meta_device_file_release);
++      clear_fd_source (impl_device);
++    }
++}
++
+ void
+ meta_kms_impl_device_prepare_shutdown (MetaKmsImplDevice *impl_device)
+ {
+Index: mutter-48.7/src/backends/native/meta-kms-impl-device.h
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-kms-impl-device.h
++++ mutter-48.7/src/backends/native/meta-kms-impl-device.h
+@@ -222,5 +222,9 @@ void meta_kms_impl_device_resume (MetaKm
+ 
+ void meta_kms_impl_device_prepare_shutdown (MetaKmsImplDevice *impl_device);
+ 
++void meta_kms_impl_device_mark_removed (MetaKmsImplDevice *impl_device);
++
++gboolean meta_kms_impl_device_is_removed (MetaKmsImplDevice *impl_device);
++
+ uint64_t meta_kms_prop_convert_value (MetaKmsProp *prop,
+                                       uint64_t     value);
+Index: mutter-48.7/src/backends/native/meta-kms.c
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-kms.c
++++ mutter-48.7/src/backends/native/meta-kms.c
+@@ -35,6 +35,7 @@ enum
+ {
+   RESOURCES_CHANGED,
+   DEVICE_ADDED,
++  DEVICE_REMOVED,
+   LEASE_CHANGED,
+ 
+   N_SIGNALS
+@@ -429,6 +430,42 @@ meta_kms_create_device (MetaKms
+   return device;
+ }
+ 
++static gpointer
++remove_device_in_impl (MetaThreadImpl  *thread_impl,
++                       gpointer         user_data,
++                       GError         **error)
++{
++  MetaKmsDevice *device = user_data;
++  MetaKms *kms = meta_kms_device_get_kms (device);
++
++  /* kms->devices is iterated in the impl context, so only modify it while
++   * the main thread is blocked waiting for this task. */
++  kms->devices = g_list_remove (kms->devices, device);
++  meta_kms_device_mark_removed_in_impl (device);
++
++  return GINT_TO_POINTER (TRUE);
++}
++
++/*
++ * Forget a device whose DRM node was hot unplugged. The device is removed
++ * from the device list, its impl device is closed and marked as removed so it
++ * never reopens its (possibly reused) path, and MetaKms::device-removed is
++ * emitted. The list reference is dropped; callers that still use the device
++ * must hold their own reference.
++ */
++void
++meta_kms_remove_device (MetaKms       *kms,
++                        MetaKmsDevice *device)
++{
++  g_return_if_fail (g_list_find (kms->devices, device));
++
++  meta_kms_run_impl_task_sync (kms, remove_device_in_impl, device, NULL);
++
++  g_signal_emit (kms, signals[DEVICE_REMOVED], 0, device);
++
++  g_object_unref (device);
++}
++
+ gboolean
+ meta_kms_is_shutting_down (MetaKms *kms)
+ {
+@@ -601,6 +638,15 @@ meta_kms_class_init (MetaKmsClass *klass
+                   G_TYPE_FROM_CLASS (klass),
+                   G_SIGNAL_RUN_LAST,
+                   0,
++                  NULL, NULL, NULL,
++                  G_TYPE_NONE, 1,
++                  META_TYPE_KMS_DEVICE);
++
++  signals[DEVICE_REMOVED] =
++    g_signal_new ("device-removed",
++                  G_TYPE_FROM_CLASS (klass),
++                  G_SIGNAL_RUN_LAST,
++                  0,
+                   NULL, NULL, NULL,
+                   G_TYPE_NONE, 1,
+                   META_TYPE_KMS_DEVICE);
+Index: mutter-48.7/src/backends/native/meta-kms.h
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-kms.h
++++ mutter-48.7/src/backends/native/meta-kms.h
+@@ -61,6 +61,9 @@ MetaKmsDevice * meta_kms_create_device (
+                                         MetaKmsDeviceFlag   flags,
+                                         GError            **error);
+ 
++void meta_kms_remove_device (MetaKms       *kms,
++                             MetaKmsDevice *device);
++
+ gboolean meta_kms_is_shutting_down (MetaKms *kms);
+ 
+ MetaKms * meta_kms_new (MetaBackend   *backend,
+Index: mutter-48.7/src/backends/native/meta-renderer-native.c
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-renderer-native.c
++++ mutter-48.7/src/backends/native/meta-renderer-native.c
+@@ -833,6 +833,36 @@ free_unused_gpu_datas (MetaRendererNativ
+                                used_gpus);
+ }
+ 
++/*
++ * Tries to release everything the renderer holds for @gpu_kms, which must no
++ * longer be part of the backend's GPU list. Returns TRUE when the renderer no
++ * longer references @gpu_kms (or its MetaKmsDevice) and it can be freed.
++ */
++gboolean
++meta_renderer_native_release_gpu (MetaRendererNative *renderer_native,
++                                  MetaGpuKms         *gpu_kms)
++{
++  MetaKmsDevice *kms_device = meta_gpu_kms_get_kms_device (gpu_kms);
++
++  g_return_val_if_fail (gpu_kms != renderer_native->primary_gpu_kms, FALSE);
++
++  /* Queued mode set updates are keyed by the (unreferenced) KMS device. */
++  if (g_hash_table_contains (renderer_native->mode_set_updates, kms_device))
++    return FALSE;
++
++  if (!g_hash_table_contains (renderer_native->gpu_datas, gpu_kms))
++    return TRUE;
++
++  /* Detached onscreens may still use the GPU data; they are only tracked
++   * once moved to the lingering list after the next mode set. */
++  if (renderer_native->detached_onscreens)
++    return FALSE;
++
++  free_unused_gpu_datas (renderer_native);
++
++  return !g_hash_table_contains (renderer_native->gpu_datas, gpu_kms);
++}
++
+ static void
+ release_unused_gpus_idle (gpointer user_data)
+ {
+Index: mutter-48.7/src/backends/native/meta-renderer-native.h
+===================================================================
+--- mutter-48.7.orig/src/backends/native/meta-renderer-native.h
++++ mutter-48.7/src/backends/native/meta-renderer-native.h
+@@ -53,6 +53,9 @@ struct gbm_device * meta_gbm_device_from
+ 
+ MetaGpuKms * meta_renderer_native_get_primary_gpu (MetaRendererNative *renderer_native);
+ 
++gboolean meta_renderer_native_release_gpu (MetaRendererNative *renderer_native,
++                                           MetaGpuKms         *gpu_kms);
++
+ MetaDeviceFile * meta_renderer_native_get_primary_device_file (MetaRendererNative *renderer_native);
+ 
+ void meta_renderer_native_prepare_frame (MetaRendererNative *renderer_native,
