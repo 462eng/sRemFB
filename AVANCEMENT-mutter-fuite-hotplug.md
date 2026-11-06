@@ -4,15 +4,17 @@ Branche `mutter-fuite-hotplug` (depuis main). Incident : nuit du 05 au 06/11/202
 (1 368 cycles plug/unplug de card1 pendant `PowerSaveMode` = 3, ~31 Mo par cycle,
 OOM à 05:37).
 
-## État (06/11/2026, ~11:40)
+## État (06/11/2026, 11:25)
 
 - [x] Mécanisme trouvé dans le code (voir plus bas), **prouvé par lecture du code**.
 - [x] Correctif amont trouvé : 3 commits GNOME 49 (septembre 2026), absents de
       la branche gnome-48 à ce jour. Rétroportés, pas de patch maison.
 - [x] Patches dans `pkg/mutter/patches/`, script `pkg/mutter/build-mutter-sremfb.sh`.
-- [ ] Paquets `48.7-0+deb13u1+sremfb2` : construction lancée sur Riza (dans le
-      scratchpad local, pas le ~ NFS). Résultat attendu dans
-      `dist/mutter-48.7-sremfb2/` (dist/ n'est pas suivi par git).
+- [x] Paquets `48.7-0+deb13u1+sremfb2` construits (06/11 11:19, nocheck) et copiés dans
+      `dist/mutter-48.7-sremfb2/` (13 .deb + 4 patches ; dist/ n'est pas suivi par git).
+      La lib non strippée contient bien `maybe_detach_onscreens` et
+      `meta_backend_remove_gpu` : sremfb1 et les rétroportages sont compilés.
+      **Rien n'est installé.**
 - [ ] Reproduction en VM : non faite, protocole ci-dessous.
 - [ ] Validation en réel : à faire par Jonathan (installation non faite, interdite ici).
 
@@ -31,7 +33,9 @@ sremfb1. sremfb2 contient sremfb1 + les 3 rétroportages.
    seulement depuis `meta_renderer_native_post_mode_set_updates()` (l. 945) et
    `dispose` (l. 2557, arrêt de mutter). `post_mode_set_updates` n'est atteint que
    depuis `maybe_post_next_frame` de meta-onscreen-native.c (l. 1723, 1738), c'est-à-dire
-   quand une frame est postée avec un modeset en attente. En veille, rien n'est posté
+   quand une frame est postée avec un modeset en attente. En veille, rien n'est posté :
+   `maybe_post_next_frame` sort tout de suite sur `meta_renderer_native_queue_power_save_page_flip()`
+   (meta-onscreen-native.c l. 1640-1645)
    (`pop_pending_mode_set` renvoie FALSE tant que le mode n'est pas ON, l. 1283).
 3. Donc pendant la veille, chaque `rebuild_views` empile les onscreens précédents et
    rien ne les libère. Il n'y a pas de fuite au sens strict : tout serait libéré à la
