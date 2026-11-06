@@ -29,6 +29,7 @@
  */
 #include <errno.h>
 #include <fcntl.h>
+#include <gio/gio.h>
 #include <glib-unix.h>
 #include <stdlib.h>
 #include <string.h>
@@ -441,7 +442,8 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
          * hotplugs: the failure run ends here, which rearms the self-heal
          * budget and opens the plug gate (see "plug gate" below) */
         plug_lit(c->srv);
-        sremfb_usb_peer_add(c);
+        if (!EV(c)->usb_early)         /* else announced while parked */
+            sremfb_usb_peer_add(c);
         sremfb_layout_client(c);
         g_message("[%s] streaming %dx%d", c->macstr, mode.width, mode.height);
     }
@@ -971,9 +973,89 @@ static int self_heal_add(SremfbServer *srv)
     return evdi_add_usable();
 }
 
+/* ------------------------------------------------------ power save */
+
+/*
+ * Night of 2026-11-06, 03:18:30: Diana's unattended APT run restarted
+ * sremfb-client on Milim while Riza had been blanked since 01:43. Every
+ * earlier reconnect (28 over three weeks) happened right after a "dpms
+ * on" — the client's panel waking is what makes it reconnect — and lit in
+ * 0-3 s: the pooled card replays the live KMS state (evdi patch,
+ * "Reconnected without modeset"), or mutter modesets a fresh plug. This
+ * one came with the screens in power save, and in power save mutter
+ * modesets nothing at all: meta_kms_device_disable() has turned every
+ * CRTC off (so the evdi replay, which needs an active CRTC, has nothing
+ * to replay), pending mode sets are held back
+ * (meta_renderer_native_pop_pending_mode_set) and only replayed when the
+ * session wakes up (on_power_save_mode_changed -> modes reset). A hotplug
+ * does not wake it. The 10 s timer then read mutter's silence as a
+ * wedge: quarantine, eight fresh cards burnt, then the loop on the
+ * quarantined card until the OOM — while the client's keyboard, the one
+ * thing that could have woken the session, is only teleported once the
+ * connector lights up.
+ *
+ * So each tick of the mode timer asks mutter for its PowerSaveMode
+ * (property of org.gnome.Mutter.DisplayConfig, read afresh every time):
+ * blanked, or woken less than SREMFB_PS_GRACE_US ago, the client is
+ * parked — the connector stays plugged, nothing is recorded against the
+ * compositor, and the client's USB devices are announced right away so
+ * its keyboard can wake the session. The wake-up modesets our connector
+ * like any other and on_mode_changed takes it from there. Unknown (no
+ * session bus, no mutter): the 10 s rule as before.
+ */
+static int compositor_power_save(void)
+{
+    GError *err = NULL;
+    GDBusConnection *bus = g_bus_get_sync(G_BUS_TYPE_SESSION, NULL, &err);
+    GVariant *r, *v;
+    int mode = -1;
+
+    if (!bus) {
+        g_debug("power save unknown: %s", err->message);
+        g_error_free(err);
+        return -1;
+    }
+    r = g_dbus_connection_call_sync(
+        bus, "org.gnome.Mutter.DisplayConfig",
+        "/org/gnome/Mutter/DisplayConfig",
+        "org.freedesktop.DBus.Properties", "Get",
+        g_variant_new("(ss)", "org.gnome.Mutter.DisplayConfig",
+                      "PowerSaveMode"),
+        G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NO_AUTO_START, 500, NULL,
+        &err);
+    g_object_unref(bus);
+    if (!r) {
+        g_debug("power save unknown: %s", err->message);
+        g_error_free(err);
+        return -1;
+    }
+    g_variant_get(r, "(v)", &v);
+    if (g_variant_is_of_type(v, G_VARIANT_TYPE_INT32))
+        mode = g_variant_get_int32(v);
+    g_variant_unref(v);
+    g_variant_unref(r);
+    return mode;
+}
+
 static gboolean on_mode_timeout(gpointer data)
 {
     SremfbClient *c = data;
+    gint64 now = g_get_monotonic_time();
+    int ps = compositor_power_save();
+
+    if (ps > 0)
+        EV(c)->ps_seen = now;
+    if (sremfb_mode_wait_verdict(ps, now, EV(c)->ps_seen) ==
+        SREMFB_MODE_WAIT_PARK) {
+        if (!EV(c)->usb_early) {
+            g_message("[%s] compositor in power save (mode %d): connector "
+                      "kept plugged until the session wakes up", c->macstr,
+                      ps);
+            sremfb_usb_peer_add(c);    /* its keyboard can wake it */
+            EV(c)->usb_early = TRUE;
+        }
+        return G_SOURCE_CONTINUE;      /* next look in 10 s */
+    }
 
     EV(c)->mode_timeout_id = 0;
     g_warning("[%s] compositor did not light up the connector within 10s "

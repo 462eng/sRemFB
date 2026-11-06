@@ -54,6 +54,9 @@ typedef struct {
     guint kick_id;             /* deferred next update request (g_idle) */
     guint mode_timeout_id;     /* answers SERVER_FAIL if the compositor
                                   never enables the connector */
+    gint64 ps_seen;            /* last mode-timer tick that found mutter in
+                                  power save (0 = none during this wait) */
+    gboolean usb_early;        /* usb peer announced while parked */
 
     /* Cursor, composed here rather than by the kernel (cursor events on,
      * see evdi.c): the plane's image and position, and the grabbuf
@@ -68,6 +71,26 @@ typedef struct {
     uint32_t *cur_under;       /* grabbuf pixels under cur_rect */
     size_t cur_under_size;     /* in pixels */
 } SremfbEvdiClient;
+
+/* Verdict of one tick of the 10 s mode timer (evdi.c, "power save"):
+ * keep the connector plugged and wait (PARK), or give up on the
+ * compositor (FAIL: quarantine, self-heal, SERVER_FAIL). power_save is
+ * mutter's DisplayConfig.PowerSaveMode (0 on, 1-3 standby/suspend/off,
+ * < 0 unknown); ps_seen when a tick last saw power save, 0 = never during
+ * this wait. A session that just woke up gets SREMFB_PS_GRACE_US to
+ * modeset before its silence counts as a failure again. */
+enum { SREMFB_MODE_WAIT_FAIL = 0, SREMFB_MODE_WAIT_PARK };
+#define SREMFB_PS_GRACE_US  ((gint64)15 * G_USEC_PER_SEC)
+
+static inline int sremfb_mode_wait_verdict(int power_save, gint64 now,
+                                           gint64 ps_seen)
+{
+    if (power_save > 0)
+        return SREMFB_MODE_WAIT_PARK;
+    if (ps_seen > 0 && now - ps_seen < SREMFB_PS_GRACE_US)
+        return SREMFB_MODE_WAIT_PARK;
+    return SREMFB_MODE_WAIT_FAIL;
+}
 
 /* The EVDI frame source (admit = plug gate, acquire = claim a device +
  * plug an EDID). */
