@@ -17,7 +17,7 @@
 int main(int argc, char **argv)
 {
     SremfbServer server = { .listen_fd = -1 };
-    SremfbEvdiState evdi = { .selfheal_left = 8 };
+    SremfbEvdiState evdi = { 0 };
     long port = SREMFB_DEFAULT_PORT;
     const char *allow = getenv("SREMFB_ALLOW");
     const char *env = getenv("SREMFB_PORT");

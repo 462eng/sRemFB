@@ -265,6 +265,15 @@ static gboolean on_listen_ready(gint fd, GIOCondition cond, gpointer data)
         return G_SOURCE_CONTINUE;
     }
 
+    if (srv->source->admit) {
+        int st = srv->source->admit(srv);
+        if (st != SREMFB_STATUS_OK) {
+            net_send_server_hello(cfd, 0, 0, 0, (uint16_t)st, 0);
+            close(cfd);
+            return G_SOURCE_CONTINUE;
+        }
+    }
+
     SremfbClient *c = g_new0(SremfbClient, 1);
     c->srv = srv;
     c->fd = cfd;

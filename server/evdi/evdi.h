@@ -21,13 +21,26 @@ typedef struct {
                                   reused as a last resort */
 } SremfbEvdiDevice;
 
+/* One entry of the plug history (evdi.c, "plug gate"): every decision
+ * about plugging — self-heal budget, backoff, hourly caps — is derived
+ * from these timestamps, nothing else is remembered. */
+typedef struct {
+    gint64 t;                  /* g_get_monotonic_time() */
+    uint8_t kind;              /* SREMFB_PLUG_EV_* (evdi.c) */
+} SremfbPlugEvent;
+
 /* Server-wide EVDI state, hung off SremfbServer.src. */
 typedef struct {
     GPtrArray *devices;        /* SremfbEvdiDevice*, open for the whole
                                   process lifetime */
-    unsigned selfheal_left;    /* fresh-device additions still allowed */
     gboolean wedge_seen;       /* a mode-timeout happened: distrust the
                                   pre-existing free devices */
+    GArray *plug_events;       /* SremfbPlugEvent, chronological; the
+                                  last hour plus the failures since the
+                                  last connector that lit up */
+    pid_t plug_shell;          /* gnome-shell the history refers to */
+    int gate_logged;           /* last gate verdict written to the
+                                  journal (log de-duplication only) */
 } SremfbEvdiState;
 
 /* Per-client EVDI state, hung off SremfbClient.src_ctx. */
@@ -56,7 +69,8 @@ typedef struct {
     size_t cur_under_size;     /* in pixels */
 } SremfbEvdiClient;
 
-/* The EVDI frame source (acquire = claim a device + plug an EDID). */
+/* The EVDI frame source (admit = plug gate, acquire = claim a device +
+ * plug an EDID). */
 extern const struct sremfb_source_ops sremfb_evdi_ops;
 
 void     sremfb_evdi_reset(unsigned count);  /* best-effort fresh devices */

@@ -116,7 +116,7 @@ Codes de statut (`enum sremfb_status`) :
 |---|---|---|
 | 0 | `OK` | flux à venir |
 | 1 | `BAD_HELLO` | hello client incompatible ou malformé |
-| 2 | `SERVER_FAIL` | le compositeur n'a jamais allumé le connecteur |
+| 2 | `SERVER_FAIL` | le compositeur n'a jamais allumé le connecteur — envoyé après le délai de mode de 10 s, ou d'emblée tant que le serveur suspend les branchements (compositeur qui ignore ses connecteurs : backoff jusqu'à 30 min, plafonds horaires) |
 | 3 | `NO_DEVICE` | aucun device EVDI libre pour ce client |
 
 ### `sremfb_frame_hdr` — 20 octets, serveur → client

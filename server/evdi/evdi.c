@@ -55,6 +55,7 @@
 #define EVS(srv) ((SremfbEvdiState *)(srv)->src)
 
 static void sremfb_evdi_kick(SremfbClient *c);
+static void plug_lit(SremfbServer *srv);
 
 /* -------------------------------------------------------------- wire */
 
@@ -437,9 +438,9 @@ static void on_mode_changed(struct evdi_mode mode, void *data)
         c->st_since_us = g_get_monotonic_time();
         sremfb_ctl_start(c);
         /* a connector lighting up proves mutter is alive and accepting
-         * hotplugs — rearm the self-heal budget (it only guards against
-         * creating devices forever when mutter is truly gone) */
-        EVS(c->srv)->selfheal_left = 8;
+         * hotplugs: the failure run ends here, which rearms the self-heal
+         * budget and opens the plug gate (see "plug gate" below) */
+        plug_lit(c->srv);
         sremfb_usb_peer_add(c);
         sremfb_layout_client(c);
         g_message("[%s] streaming %dx%d", c->macstr, mode.width, mode.height);
@@ -739,19 +740,234 @@ static int evdi_add_usable(void)
     return -1;
 }
 
+/* ------------------------------------------------------- plug gate */
+
+/*
+ * Every EDID plug is a hotplug for mutter, and a mutter that stopped
+ * lighting our connectors still processes them — leaking its GEM/shmem
+ * buffers each time (≈31 MB per 1920x1080 cycle, unevictable, owned by
+ * no process). Night of 2026-11-06: once the self-heal budget was spent,
+ * acquire fell back to the quarantined card and the client's retry loop
+ * re-plugged it every ~16 s for six hours: 1368 cycles, swap full, OOM.
+ *
+ * So plugging goes through a gate, computed afresh at each connection
+ * from a short history of timestamps (plugs, lit connectors, mode
+ * timeouts) — no sticky flag:
+ *
+ *  - the failure run = mode timeouts since the last connector that lit
+ *    up. Its first SELFHEAL_BUDGET failures may each mint a fresh device
+ *    (self-heal); past that the budget is spent and plugging backs off:
+ *    one probe plug BACKOFF_MIN_S after the last failure, then doubling,
+ *    capped at BACKOFF_MAX_S. Clients are turned away meanwhile with
+ *    SERVER_FAIL (what they would get after 10 s anyway, minus the
+ *    hotplug).
+ *  - whatever the path, at most FAILS_PER_HOUR mode timeouts and
+ *    PLUGS_PER_HOUR plugs per sliding hour.
+ *  - a connector lighting up ends the run; a different gnome-shell (the
+ *    session was re-logged in, or the shell restarted) clears the whole
+ *    history.
+ */
+#define SELFHEAL_BUDGET    8           /* fresh devices per failure run */
+#define BACKOFF_MIN_S      60
+#define BACKOFF_MAX_S      (30 * 60)
+#define FAILS_PER_HOUR     16
+#define PLUGS_PER_HOUR     60
+#define PLUG_WINDOW_US     ((gint64)3600 * G_USEC_PER_SEC)
+#define PLUG_EVENTS_MAX    1024
+
+enum { SREMFB_PLUG_EV_PLUG = 0, SREMFB_PLUG_EV_LIT, SREMFB_PLUG_EV_FAIL };
+enum { GATE_OPEN = 0, GATE_BACKOFF, GATE_FAIL_CAP, GATE_PLUG_CAP };
+
+/* What the history says right now. */
+typedef struct {
+    int verdict;                       /* GATE_* */
+    gint64 until;                      /* monotonic, when not GATE_OPEN */
+    unsigned fail_run;                 /* failures since the last lit */
+} PlugGate;
+
+static GArray *plug_events(SremfbServer *srv)
+{
+    if (!EVS(srv)->plug_events)
+        EVS(srv)->plug_events = g_array_new(FALSE, FALSE,
+                                            sizeof(SremfbPlugEvent));
+    return EVS(srv)->plug_events;
+}
+
+/* Drops what no rule looks at any more: older than the window, except
+ * the failures of the current run (the backoff counts them all). A
+ * different gnome-shell clears everything. */
+static void plug_prune(SremfbServer *srv, gint64 now)
+{
+    GArray *ev = plug_events(srv);
+    pid_t shell = compositor_pid();
+    int last_lit = -1;
+    guint keep = 0;
+
+    if (shell != EVS(srv)->plug_shell) {
+        if (ev->len > 0)
+            g_message("plug gate: gnome-shell changed (pid %d -> %d), plug "
+                      "history cleared", (int)EVS(srv)->plug_shell,
+                      (int)shell);
+        g_array_set_size(ev, 0);
+        EVS(srv)->plug_shell = shell;
+        EVS(srv)->gate_logged = GATE_OPEN;
+        return;
+    }
+    for (guint i = 0; i < ev->len; i++)
+        if (g_array_index(ev, SremfbPlugEvent, i).kind ==
+            SREMFB_PLUG_EV_LIT)
+            last_lit = (int)i;
+    for (guint i = 0; i < ev->len; i++) {
+        SremfbPlugEvent e = g_array_index(ev, SremfbPlugEvent, i);
+        if (e.t >= now - PLUG_WINDOW_US ||
+            (e.kind == SREMFB_PLUG_EV_FAIL && (int)i > last_lit))
+            g_array_index(ev, SremfbPlugEvent, keep++) = e;
+    }
+    g_array_set_size(ev, keep);
+    if (ev->len > PLUG_EVENTS_MAX)
+        g_array_remove_range(ev, 0, ev->len - PLUG_EVENTS_MAX);
+}
+
+static void plug_record(SremfbServer *srv, uint8_t kind)
+{
+    gint64 now = g_get_monotonic_time();
+    SremfbPlugEvent e = { .t = now, .kind = kind };
+
+    plug_prune(srv, now);
+    g_array_append_val(plug_events(srv), e);
+}
+
+/* When the count of `kind` events inside the sliding window drops below
+ * `cap` again (0 = it already is). */
+static gint64 window_free_at(GArray *ev, uint8_t kind, gint64 now,
+                             unsigned cap)
+{
+    unsigned n = 0, k = 0;
+
+    for (guint i = 0; i < ev->len; i++) {
+        SremfbPlugEvent *e = &g_array_index(ev, SremfbPlugEvent, i);
+        if (e->kind == kind && e->t >= now - PLUG_WINDOW_US)
+            n++;
+    }
+    if (n < cap)
+        return 0;
+    /* the (n - cap + 1)-th oldest in the window has to age out */
+    for (guint i = 0; i < ev->len; i++) {
+        SremfbPlugEvent *e = &g_array_index(ev, SremfbPlugEvent, i);
+        if (e->kind == kind && e->t >= now - PLUG_WINDOW_US &&
+            ++k == n - cap + 1)
+            return e->t + PLUG_WINDOW_US;
+    }
+    return 0;                          /* not reached */
+}
+
+static PlugGate plug_gate(SremfbServer *srv, gint64 now)
+{
+    PlugGate g = { GATE_OPEN, 0, 0 };
+    GArray *ev;
+    gint64 last_fail = 0, t;
+
+    plug_prune(srv, now);
+    ev = plug_events(srv);
+    for (guint i = 0; i < ev->len; i++) {
+        SremfbPlugEvent *e = &g_array_index(ev, SremfbPlugEvent, i);
+        if (e->kind == SREMFB_PLUG_EV_LIT) {
+            g.fail_run = 0;
+        } else if (e->kind == SREMFB_PLUG_EV_FAIL) {
+            g.fail_run++;
+            last_fail = e->t;
+        }
+    }
+    if (g.fail_run > SELFHEAL_BUDGET) {
+        unsigned shift = MIN(g.fail_run - SELFHEAL_BUDGET - 1, 16u);
+        gint64 delay = MIN((gint64)BACKOFF_MIN_S << shift,
+                           (gint64)BACKOFF_MAX_S) * G_USEC_PER_SEC;
+        if (last_fail + delay > now) {
+            g.verdict = GATE_BACKOFF;
+            g.until = last_fail + delay;
+        }
+    }
+    t = window_free_at(ev, SREMFB_PLUG_EV_FAIL, now, FAILS_PER_HOUR);
+    if (t > now && t > g.until) {
+        g.verdict = GATE_FAIL_CAP;
+        g.until = t;
+    }
+    t = window_free_at(ev, SREMFB_PLUG_EV_PLUG, now, PLUGS_PER_HOUR);
+    if (t > now && t > g.until) {
+        g.verdict = GATE_PLUG_CAP;
+        g.until = t;
+    }
+    return g;
+}
+
+/* Gate verdict for a new client, journaled once per change. */
+static int evdi_source_admit(SremfbServer *srv)
+{
+    gint64 now = g_get_monotonic_time();
+    PlugGate g = plug_gate(srv, now);
+
+    if (g.verdict != EVS(srv)->gate_logged) {
+        if (g.verdict == GATE_OPEN) {
+            g_message("plug gate open again (%u failure(s) in the current "
+                      "run): next client probes the compositor",
+                      g.fail_run);
+        } else {
+            gint64 secs = (g.until - now + G_USEC_PER_SEC - 1) /
+                          G_USEC_PER_SEC;
+            GDateTime *at = g_date_time_new_from_unix_local(
+                g_get_real_time() / G_USEC_PER_SEC + secs);
+            gchar *hms = at ? g_date_time_format(at, "%H:%M:%S") : NULL;
+            const char *why =
+                g.verdict == GATE_BACKOFF ?
+                    "self-heal budget spent, the compositor keeps ignoring "
+                    "our connectors (backoff)" :
+                g.verdict == GATE_FAIL_CAP ?
+                    "too many mode timeouts in the last hour (cap "
+                    G_STRINGIFY(FAILS_PER_HOUR) ")" :
+                    "too many plugs in the last hour (cap "
+                    G_STRINGIFY(PLUGS_PER_HOUR) ")";
+            g_warning("plug gate closed: %s — %u failure(s) in the current "
+                      "run; clients refused (SERVER_FAIL) until %s (%" 
+                      G_GINT64_FORMAT " s). A GNOME session re-login "
+                      "clears mutter and reopens the gate", why, g.fail_run,
+                      hms ? hms : "?", secs);
+            g_free(hms);
+            if (at)
+                g_date_time_unref(at);
+        }
+        EVS(srv)->gate_logged = g.verdict;
+    }
+    return g.verdict == GATE_OPEN ? SREMFB_STATUS_OK
+                                  : SREMFB_STATUS_SERVER_FAIL;
+}
+
+/* A connector lit up: the failure run is over. */
+static void plug_lit(SremfbServer *srv)
+{
+    PlugGate g = plug_gate(srv, g_get_monotonic_time());
+
+    if (g.fail_run > 0)
+        g_message("plug gate: connector lit after %u failure(s), back to "
+                  "normal", g.fail_run);
+    plug_record(srv, SREMFB_PLUG_EV_LIT);
+    EVS(srv)->gate_logged = GATE_OPEN;
+}
+
 /* Self-heal: once a mode-timeout proved that mutter wedges on the
  * devices we inherited, stop trusting pre-existing free devices: create a
- * brand-new one at acquire time and plug it immediately. Bounded, so a
- * compositor that is truly gone does not get cards forever. Returns the
- * new card index, or -1. */
+ * brand-new one at acquire time and plug it immediately. Bounded per
+ * failure run, so a compositor that is truly gone does not get cards
+ * forever (and past the budget the plug gate backs off). Returns the new
+ * card index, or -1. */
 static int self_heal_add(SremfbServer *srv)
 {
-    if (EVS(srv)->selfheal_left == 0) {
-        g_warning("self-heal budget spent — a session re-login will "
-                  "clear mutter");
+    PlugGate g = plug_gate(srv, g_get_monotonic_time());
+
+    if (g.fail_run > SELFHEAL_BUDGET) {
+        g_debug("self-heal budget spent (%u failures) — a session "
+                "re-login will clear mutter", g.fail_run);
         return -1;
     }
-    EVS(srv)->selfheal_left--;
     return evdi_add_usable();
 }
 
@@ -771,6 +987,7 @@ static gboolean on_mode_timeout(gpointer data)
         g_warning("[%s] quarantining /dev/dri/card%d", c->macstr,
                   EV(c)->dev->card);
     }
+    plug_record(c->srv, SREMFB_PLUG_EV_FAIL);
     if (c->fd >= 0)
         net_send_server_hello(c->fd, 0, 0, 0, SREMFB_STATUS_SERVER_FAIL, 0);
     sremfb_client_lost(c);
@@ -810,6 +1027,7 @@ static void sremfb_evdi_plug(SremfbClient *c)
     /* after the connect: the kernel turns them off on every disconnect */
     evdi_enable_cursor_events(EV(c)->dev->handle, true);
     EV(c)->plugged = TRUE;
+    plug_record(c->srv, SREMFB_PLUG_EV_PLUG);
     c->state = SREMFB_CLIENT_MODE_WAIT;
     EV(c)->mode_timeout_id = g_timeout_add_seconds(10, on_mode_timeout, c);
     g_message("[%s] connector plugged at %ux%u (serial 0x%08x), waiting "
@@ -1057,6 +1275,10 @@ static void sremfb_evdi_release(SremfbClient *c)
  * STREAMING and sends the server hello. */
 static int evdi_source_acquire(SremfbClient *c)
 {
+    /* the gate again, right before the hotplug: admit() and acquire()
+     * run back to back today, but no path may plug past it */
+    if (plug_gate(c->srv, g_get_monotonic_time()).verdict != GATE_OPEN)
+        return SREMFB_STATUS_SERVER_FAIL;
     c->src_ctx = g_new0(SremfbEvdiClient, 1);
     if (!sremfb_evdi_acquire(c)) {
         g_message("[%s] no free evdi device — raise initial_device_count "
@@ -1082,6 +1304,7 @@ static void evdi_source_release(SremfbClient *c)
 const struct sremfb_source_ops sremfb_evdi_ops = {
     .acquire = evdi_source_acquire,
     .release = evdi_source_release,
+    .admit = evdi_source_admit,
 };
 
 void sremfb_evdi_close_all(SremfbServer *srv)
@@ -1097,4 +1320,7 @@ void sremfb_evdi_close_all(SremfbServer *srv)
     }
     g_ptr_array_free(EVS(srv)->devices, TRUE);
     EVS(srv)->devices = NULL;
+    if (EVS(srv)->plug_events)
+        g_array_free(EVS(srv)->plug_events, TRUE);
+    EVS(srv)->plug_events = NULL;
 }

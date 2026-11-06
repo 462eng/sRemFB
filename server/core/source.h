@@ -12,6 +12,7 @@
  */
 
 typedef struct SremfbClient SremfbClient;
+typedef struct SremfbServer SremfbServer;
 
 /* Damage rectangle, [x1,x2) x [y1,y2). The one shape every source
  * reports damage in — mirrors struct evdi_rect field for field so the
@@ -37,6 +38,15 @@ struct sremfb_source_ops {
      * SREMFB_STATUS_* on immediate failure (the core answers that status
      * and drops the client). Must clean up its own state on failure. */
     int  (*acquire)(SremfbClient *c);
+
+    /* Optional, may be NULL. Asked before a new client is even logged:
+     * SREMFB_STATUS_OK to go on to acquire(), or a SREMFB_STATUS_* the
+     * core answers silently before dropping the connection. Lets a
+     * source turn clients away cheaply — and without a journal line per
+     * attempt — while it knows acquisition cannot work (EVDI: the
+     * compositor stopped lighting connectors). The source logs its own
+     * state changes. */
+    int  (*admit)(SremfbServer *srv);
 
     /* Release everything tied to the client (teardown / replacement).
      * Safe to call whether or not acquire() succeeded. */

@@ -112,7 +112,7 @@ Status codes (`enum sremfb_status`):
 |---|---|---|
 | 0 | `OK` | stream to follow |
 | 1 | `BAD_HELLO` | incompatible or malformed client hello |
-| 2 | `SERVER_FAIL` | the compositor never lit the connector |
+| 2 | `SERVER_FAIL` | the compositor never lit the connector — answered after the 10 s mode timeout, or right away while the server suspends plugging (compositor ignoring its connectors: backoff up to 30 min, hourly caps) |
 | 3 | `NO_DEVICE` | no free EVDI device for this client |
 
 ### `sremfb_frame_hdr` — 20 bytes, server → client
